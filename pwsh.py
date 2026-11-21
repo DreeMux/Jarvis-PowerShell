@@ -8284,8 +8284,12 @@ def jv_voice_set(on):
         if not jv_voice_start():
             err = st["err"] or "unknown error"
             jarvis_say("I can't start the speech engine, sir, so I stay silent.")
-            if "pyttsx3" in err:
-                out("  Install it once with:  pip install pyttsx3     (free, local, offline; on Linux also: sudo apt install espeak-ng)", GRAY)
+            if "No module named" in err:
+                out(f"  Missing: {safe(err)[:120]}", GRAY)
+                if os.name == "nt":
+                    out("  Install what it needs with:  pip install pyttsx3 pywin32 comtypes     (free, local, offline)", GRAY)
+                else:
+                    out("  Install it with:  pip install pyttsx3     (on Linux also: sudo apt install espeak-ng)", GRAY)
             else:
                 out(f"  {safe(err)[:200]}", GRAY)
             out()
