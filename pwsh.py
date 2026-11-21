@@ -2230,6 +2230,7 @@ def jv_examples(t):
         ("CHAT", 'jarvis perfect   |   yo big jarvis   |   tell me a joke   |   how are you   |   again (repeats my last request)'),
         ("ONLINE / RESEARCH", 'jarvis be online   |   jarvis search <topic>   |   jarvis cerca <topic>   |   jarvis go offline'),
         ("CHROME (online)", 'jarvis open chrome then gmail on account anna   |   open chrome, youtube lofi and canva   |   apri chrome poi gmail con account paolo'),
+        ("CHROME LAYOUT", 'chrome full screen   |   chrome side by side   |   open chrome full screen then gmail   |   apri chrome accanto poi canva'),
         ("NEWS (online)", 'jarvis news   |   jarvis news war   |   jarvis notizie sulle proteste   (world stories in parts, photo + long summary)'),
         ("SECURITY / UPDATE", 'security   |   implement jarvis   |   implement jarvis -Dry   |   implement jarvis <file.py>   |   go in maintenance'),
     ]
@@ -5569,12 +5570,17 @@ def jv_chain(orig, t):
         return False
     chrome_re = re.compile(r"^(?:" + JV_CHAIN_VERB + r"\s+)?(?:google\s+)?chrome$", re.I)
     items, started = [], bool(br)                     # ("chrome", account) / ("site", phrase, account)
+    layout = None
     for i, p in enumerate(parts):
         acct = None
+        p, lay1 = jv_launch_layout_strip(p)
         m = JV_CHAIN_ACCT.search(p)
         if m:
             acct = re.split(r"\s+(?:and|e)\s+", m.group(1).strip(), 1)[0].strip(" \"'`")
             p = p[:m.start()].strip()
+            p, lay2 = jv_launch_layout_strip(p)
+            lay1 = lay1 or lay2
+        layout = lay1 or layout
         if not p:
             return False
         if chrome_re.match(p) and (i == 0 or started or p.lower().startswith(("open", "apri", "launch", "start", "avvia", "lancia"))):
@@ -5640,6 +5646,8 @@ def jv_chain(orig, t):
         cur, label = found[queries[0]]["dir"], found[queries[0]]["name"]
     nsites = sum(1 for x in items if x[0] == "site")
     jarvis_say(f"On it, sir: {nsites} page(s) in one go" + (f", account '{safe(label)}'" if label else "") + ".")
+    if layout:
+        CONTESTO["jv_chrome_layout"] = layout
     CONTESTO["jv_browser"] = {"profile": cur, "label": label}
     for x in items:
         if x[-1]:
@@ -5827,6 +5835,7 @@ def jarvis_interpret(texto):
   jarvis open chrome            (online only) Chrome mode: then  open email / open canva / open youtube lofi / search <words>
                                 open pages in Chrome;  open chrome account <name or number>  picks the account;  close chrome mode  ends it
   jarvis open chrome then gmail on account <name>   several steps in ONE sentence (online only; also: and, poi, e poi, dopo)
+  chrome full screen / chrome side by side   where Chrome opens: maximised, or NEXT to my window (default), never on top of it
   jarvis open deltarune         STARTS the installed game (jarvis open deltarune chapter 2 picks a chapter)
   open deltarune                without 'jarvis': only shows the data.win read-only, never starts the game
   implement jarvis              update myself (see: help implement)       maintenance   health check
@@ -7427,6 +7436,36 @@ def jv_upd_selftest():
             finally:
                 CONTESTO.update(jv_launch_dry=False, jv_browser=None, jv_online=False, jv_named=False)
         run("several steps in one sentence: 'open chrome then gmail on account ...' (nothing is opened)", chain_test, need=["page(s) in one go", "online"])
+        def layout_test():
+            for text, want in (("open chrome full screen", ("open chrome", "full")), ("open chrome accanto", ("open chrome", "side")),
+                               ("open chrome side by side", ("open chrome", "side")), ("gmail on account x a schermo intero", ("gmail on account x", "full")),
+                               ("open chrome", ("open chrome", None))):
+                got = jv_launch_layout_strip(text)
+                if want[1] is None and got[1] is None:
+                    continue
+                if got != want:
+                    raise RuntimeError(f"'{text}' gave {got}, expected {want}")
+            CONTESTO["jv_launch_dry"] = True
+            try:
+                CONTESTO.update(jv_online=True, jv_named=True, jv_browser=None, jv_chrome_layout=None)
+                if not jv_launch_browser("chrome full screen", "chrome full screen") or CONTESTO.get("jv_chrome_layout") != "full":
+                    raise RuntimeError("'chrome full screen' did not set the layout")
+                if not jv_launch_browser("chrome side by side", "chrome side by side") or CONTESTO.get("jv_chrome_layout") != "side":
+                    raise RuntimeError("'chrome side by side' did not set the layout")
+                jv_launch_browser("open chrome full screen", "open chrome full screen")
+                if CONTESTO.get("jv_chrome_layout") != "full":
+                    raise RuntimeError("'open chrome full screen' did not set the layout")
+                jv_chain("open chrome side by side then gmail", "open chrome side by side then gmail")
+                if CONTESTO.get("jv_chrome_layout") != "side":
+                    raise RuntimeError("the chain did not take the layout")
+                kind, rect = jv_launch_plan_rect("full")
+                if kind != "full":
+                    raise RuntimeError("full screen plan is wrong")
+                print("ok")
+            finally:
+                CONTESTO.update(jv_launch_dry=False, jv_browser=None, jv_online=False, jv_named=False, jv_chrome_layout=None)
+                CONTESTO.pop("jv_chrome_win", None)
+        run("Chrome layout words: full screen / beside Jarvis (nothing is opened)", layout_test)
 
         section("Update system (checks only, nothing is installed)")
         run("Get-SecurityStatus panel", cmd("Get-SecurityStatus"), need=["SECURITY STATUS", "FINGERPRINT", "CODE SCAN", "GUARD", "ISOLATION"])
@@ -8138,8 +8177,151 @@ def jv_launch_profile_match(query, profs):
     return [names[c] for c in close]
 
 
+# ---- where Chrome goes on the screen: full screen, or next to the Jarvis window (never on top of it) ----
+JV_LAUNCH_LAYOUT_RE = re.compile(
+    r"\s*(?:,\s*)?(?:(?:in|on|to|su|a)\s+)?(?:(full\s*-?\s*screen|maximi[sz]ed?|schermo intero|tutto schermo)"
+    r"|(side\s*-?\s*by\s*-?\s*side|next to jarvis|beside jarvis|accanto(?:\s+a|\s+al)?(?:\s+jarvis|\s+alla finestra di jarvis)?|"
+    r"di fianco(?:\s+a jarvis)?|affiancat[oa]))\s*$", re.I)
+
+
+def jv_launch_layout_strip(text):
+    """'open chrome full screen' -> ('open chrome', 'full'); '... accanto' -> (..., 'side'); no layout words -> (text, None)."""
+    m = JV_LAUNCH_LAYOUT_RE.search(text)
+    if not m or m.start() == 0:
+        return text, None
+    return text[:m.start()].strip(" ,;"), "full" if m.group(1) else "side"
+
+
+def jv_launch_layout():
+    return CONTESTO.get("jv_chrome_layout") or "side"
+
+
+def jv_launch_win_api():
+    """The few Windows calls used to place windows (Windows only; None elsewhere or when they are not available)."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u, k = ctypes.windll.user32, ctypes.windll.kernel32
+        H, I, U = wintypes.HWND, ctypes.c_int, wintypes.UINT
+
+        class MI(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                        ("dwFlags", wintypes.DWORD)]
+        k.GetConsoleWindow.restype = H
+        u.GetAncestor.restype, u.GetAncestor.argtypes = H, [H, U]
+        u.GetWindowRect.argtypes = [H, ctypes.POINTER(wintypes.RECT)]
+        u.MonitorFromWindow.restype, u.MonitorFromWindow.argtypes = wintypes.HANDLE, [H, wintypes.DWORD]
+        u.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MI)]
+        u.SetWindowPos.argtypes = [H, H, I, I, I, I, U]
+        u.ShowWindow.argtypes = [H, I]
+        u.IsWindow.argtypes = [H]
+        u.IsWindowVisible.argtypes = [H]
+        u.IsZoomed.argtypes = [H]
+        u.GetClassNameW.argtypes = [H, wintypes.LPWSTR, I]
+        u.GetWindowTextLengthW.argtypes = [H]
+        return {"c": ctypes, "w": wintypes, "u": u, "k": k, "MI": MI}
+    except Exception:
+        return None
+
+
+def jv_launch_screen_rects(api):
+    """(work area, Jarvis window rectangle, Jarvis window handle) as (l, t, r, b) tuples, or None."""
+    u, k, c, w, MI = api["u"], api["k"], api["c"], api["w"], api["MI"]
+    hwnd = k.GetConsoleWindow()
+    if not hwnd:
+        return None
+    root = u.GetAncestor(hwnd, 3) or hwnd                      # GA_ROOTOWNER: the real window, also inside Windows Terminal
+    r = w.RECT()
+    if not u.GetWindowRect(root, c.byref(r)):
+        return None
+    mi = MI()
+    mi.cbSize = c.sizeof(MI)
+    mon = u.MonitorFromWindow(root, 2)                         # the screen where the Jarvis window is
+    if not mon or not u.GetMonitorInfoW(mon, c.byref(mi)):
+        return None
+    wa = mi.rcWork
+    return (wa.left, wa.top, wa.right, wa.bottom), (r.left, r.top, r.right, r.bottom), root
+
+
+def jv_launch_plan_rect(layout):
+    """Where Chrome should go: ('full', None) or ('rect', (x, y, w, h)). 'side' picks the free space beside the
+    Jarvis window; when there is not enough room, Jarvis is moved to one half of the screen and Chrome gets the other,
+    so the two windows never overlap."""
+    api = jv_launch_win_api()
+    if layout == "full" or api is None:
+        return ("full", None) if layout == "full" else (None, None)
+    got = jv_launch_screen_rects(api)
+    if not got:
+        return None, None
+    (wl, wt, wr, wb), (jl, jt, jr, jb), root = got
+    need = max(640, int((wr - wl) * 0.35))
+    zoomed = bool(api["u"].IsZoomed(root))
+    if not zoomed and jr <= wr and wr - jr >= need:
+        return "rect", (jr, wt, wr - jr, wb - wt)
+    if not zoomed and jl >= wl and jl - wl >= need:
+        return "rect", (wl, wt, jl - wl, wb - wt)
+    half = (wr - wl) // 2                                      # no room: tile the screen, Jarvis left, Chrome right
+    api["u"].ShowWindow(root, 9)                               # SW_RESTORE
+    api["u"].SetWindowPos(root, None, wl, wt, half, wb - wt, 0x0010 | 0x0040)
+    return "rect", (wl + half, wt, (wr - wl) - half, wb - wt)
+
+
+def jv_launch_chrome_windows(api):
+    """Handles of the visible Chrome windows right now."""
+    found = []
+    c, u = api["c"], api["u"]
+    proc_t = c.WINFUNCTYPE(c.c_int, api["w"].HWND, api["w"].LPARAM)
+
+    def cb(hwnd, _lp):
+        try:
+            if u.IsWindowVisible(hwnd) and u.GetWindowTextLengthW(hwnd) > 0:
+                buf = c.create_unicode_buffer(64)
+                u.GetClassNameW(hwnd, buf, 64)
+                if buf.value == "Chrome_WidgetWin_1":
+                    found.append(hwnd)
+        except Exception:
+            pass
+        return 1
+    u.EnumWindows.argtypes = [proc_t, api["w"].LPARAM]
+    u.EnumWindows(proc_t(cb), 0)
+    return set(found)
+
+
+def jv_launch_apply(hwnd, kind, rect, api):
+    """Move one Chrome window: maximised, or into the rectangle beside Jarvis."""
+    u = api["u"]
+    u.ShowWindow(hwnd, 9)                                      # restore first (a maximised window ignores moves)
+    if kind == "full":
+        u.ShowWindow(hwnd, 3)                                  # SW_MAXIMIZE
+    elif kind == "rect" and rect:
+        x, y, w, h = rect
+        u.SetWindowPos(hwnd, None, x, y, w, h, 0x0010 | 0x0040)   # no activate, show
+
+
+def jv_launch_relayout():
+    """'chrome full screen' / 'chrome side by side' while Chrome windows of this session are open."""
+    wins = CONTESTO.get("jv_chrome_win") or {}
+    api = jv_launch_win_api()
+    if not wins or api is None:
+        return 0
+    kind, rect = jv_launch_plan_rect(jv_launch_layout())
+    n = 0
+    for key, hwnd in list(wins.items()):
+        try:
+            if api["u"].IsWindow(hwnd):
+                jv_launch_apply(hwnd, kind, rect, api)
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
 def jv_launch_chrome_open(urls, profile_dir=None):
-    """Start Chrome (read-only for me: I only hand it addresses). The command is a list, never a shell string."""
+    """Start Chrome (read-only for me: I only hand it addresses). The command is a list, never a shell string.
+    The first window of each account in this session is placed (full screen, or beside the Jarvis window);
+    later pages open as tabs in that window."""
     import subprocess
     if CONTESTO.get("jv_launch_dry"):
         return True
@@ -8154,6 +8336,32 @@ def jv_launch_chrome_open(urls, profile_dir=None):
         if not JV_LAUNCH_PROFILE_DIR.match(profile_dir):
             return False
         cmd.append("--profile-directory=" + profile_dir)
+    api = jv_launch_win_api()
+    wins = CONTESTO.setdefault("jv_chrome_win", {})
+    key = profile_dir or ""
+    old = wins.get(key)
+    first = True
+    try:
+        first = not (api is not None and old and api["u"].IsWindow(old))
+    except Exception:
+        first = True
+    kind, rect, before = None, None, set()
+    if first:
+        layout = jv_launch_layout()
+        try:
+            kind, rect = jv_launch_plan_rect(layout)
+        except Exception:
+            kind, rect = None, None
+        cmd.append("--new-window")
+        if kind == "full":
+            cmd.append("--start-maximized")
+        elif kind == "rect" and rect:
+            cmd += [f"--window-position={rect[0]},{rect[1]}", f"--window-size={rect[2]},{rect[3]}"]
+        if api is not None:
+            try:
+                before = jv_launch_chrome_windows(api)
+            except Exception:
+                before = set()
     cmd += list(urls)
     kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
     if os.name == "nt":
@@ -8161,6 +8369,20 @@ def jv_launch_chrome_open(urls, profile_dir=None):
     else:
         kw["start_new_session"] = True
     subprocess.Popen(cmd, **kw)
+    if first and api is not None and kind:
+        end = time.time() + 6                                   # wait for the new window, then put it exactly in place
+        while time.time() < end:
+            time.sleep(0.2)
+            try:
+                new = jv_launch_chrome_windows(api) - before
+            except Exception:
+                break
+            if new:
+                hwnd = sorted(new)[0]
+                wins[key] = hwnd
+                time.sleep(0.4)
+                jv_launch_apply(hwnd, kind, rect, api)
+                break
     return True
 
 
@@ -8173,9 +8395,22 @@ def jv_launch_browser(orig, t):
     s = re.sub(r"[\s.,;:!?]+$", "", t.strip())
     s = re.sub(r"^(?:please|pls|per favore|ok|then|poi|now|ora)[,\s]+", "", s)
     s = re.sub(r"^(?:can|could|would) you(?: please)?\s+|^(?:puoi|potresti)\s+", "", s)
+    s_lay, lay = jv_launch_layout_strip(s)
+    if lay and (named or br) and re.fullmatch(r"(?:(?:make|put|set|metti|imposta|use|usa)\s+)?(?:the\s+)?(?:chrome|browser|layout)"
+                                              r"(?:\s+(?:mode|window|windows|finestra))?", s_lay):
+        CONTESTO["jv_chrome_layout"] = lay
+        moved = jv_launch_relayout()
+        jarvis_say(("Chrome will open full screen, sir" if lay == "full" else
+                    "Chrome will open next to my window, sir, never on top of it")
+                   + (f" ({moved} open window(s) moved)." if moved else "."))
+        return True
+    if lay and re.fullmatch(r"(?:open|launch|start|apri|avvia|lancia|switch to|passa a|use|usa)\s+(?:google\s+)?chrome.*", s_lay):
+        CONTESTO["jv_chrome_layout"] = lay
+        s = s_lay
     if br and re.fullmatch(r"(?:close|exit|stop|end|leave|quit|chiudi|termina|esci da|finish)\s+(?:the\s+)?(?:chrome|browser|browsing)(?:\s+mode)?|"
                            r"(?:done|finished) (?:with )?(?:chrome|the browser)|(?:chrome|browser) mode off", s):
         CONTESTO["jv_browser"] = None
+        CONTESTO.pop("jv_chrome_win", None)
         jarvis_say("Chrome mode ended, sir. I only stop sending pages; the browser window stays as it is.")
         return True
     m = re.fullmatch(r"(?:open|launch|start|apri|avvia|lancia|switch to|passa a|use|usa)\s+(?:google\s+)?chrome"
