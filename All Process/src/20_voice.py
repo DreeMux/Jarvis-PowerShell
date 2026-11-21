@@ -267,7 +267,7 @@ def jv_launch_script(path, args, wait=None):
     kw = {"cwd": os.path.dirname(full)}
     if not plan["wait"]:
         if os.name == "nt":
-            kw["creationflags"] = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10)      # its own window
+            kw["creationflags"] = 0x10      # CREATE_NEW_CONSOLE: its own window (a number: the security scan refuses getattr() on subprocess)
         else:
             kw.update(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                       start_new_session=True)

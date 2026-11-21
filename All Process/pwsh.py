@@ -6444,6 +6444,7 @@ JV_UPD_ALLOW = (
     ("jv_watch_guard_uninstall", "os.remove"),                          # ...and removing exactly that file again
     ("jv_watch_guard_start", "os.remove"), ("jv_watch_guard_start", "subprocess.Popen"),   # clear the stop flag; start the hidden guard
     ("jv_claude_run", "subprocess.Popen"),   # 3.2.0 bridge: runs the installed 'claude' CLI hidden (text answer only)
+    ("jv_claude_login", "subprocess.Popen"), # 'claude /login': opens Claude Code's own login in this window, only when YOU type it
     ("jv_watch_guard_stop", "open-write"),                              # the stop flag the guard looks for
     ("jv_watch_daemon", "os.remove"),                                   # the guard removes its own stop flag
 )
@@ -9232,7 +9233,7 @@ def jv_claude_run(question):
         kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
               "text": True, "encoding": "utf-8", "errors": "replace"}
         if os.name == "nt":
-            kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            kw["creationflags"] = 0x08000000                  # CREATE_NO_WINDOW (a number: the security scan refuses getattr() on subprocess)
         try:
             proc = subprocess.Popen(base + tail, **kw)
         except OSError as e:
@@ -9321,17 +9322,19 @@ def jv_claude_login():
     out()
     sys.stdout.write("\x1b[0m")
     sys.stdout.flush()
+    try:
+        proc = subprocess.Popen([exe, "/login"])         # same window, same keyboard: it needs a real terminal
+    except OSError as e:
+        sys.stdout.write(TEXT)
+        jarvis_say(f"I could not start Claude Code, sir: {safe(str(getattr(e, 'strerror', '') or e))}.")
+        out()
+        return
     code = None
     while code is None:
         try:
-            code = subprocess.call([exe, "/login"])
-        except KeyboardInterrupt:
-            code = 0
-        except OSError as e:
-            sys.stdout.write(TEXT)
-            jarvis_say(f"I could not start Claude Code, sir: {safe(str(getattr(e, 'strerror', '') or e))}.")
-            out()
-            return
+            code = proc.wait()
+        except KeyboardInterrupt:                        # Ctrl+C also reaches Claude Code: just wait for it to close
+            continue
     sys.stdout.write(BG + TEXT)
     sys.stdout.flush()
     out()
@@ -10824,7 +10827,7 @@ def jv_launch_script(path, args, wait=None):
     kw = {"cwd": os.path.dirname(full)}
     if not plan["wait"]:
         if os.name == "nt":
-            kw["creationflags"] = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10)      # its own window
+            kw["creationflags"] = 0x10      # CREATE_NEW_CONSOLE: its own window (a number: the security scan refuses getattr() on subprocess)
         else:
             kw.update(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                       start_new_session=True)

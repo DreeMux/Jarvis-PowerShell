@@ -137,7 +137,7 @@ def jv_claude_run(question):
         kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
               "text": True, "encoding": "utf-8", "errors": "replace"}
         if os.name == "nt":
-            kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            kw["creationflags"] = 0x08000000                  # CREATE_NO_WINDOW (a number: the security scan refuses getattr() on subprocess)
         try:
             proc = subprocess.Popen(base + tail, **kw)
         except OSError as e:
@@ -226,17 +226,19 @@ def jv_claude_login():
     out()
     sys.stdout.write("\x1b[0m")
     sys.stdout.flush()
+    try:
+        proc = subprocess.Popen([exe, "/login"])         # same window, same keyboard: it needs a real terminal
+    except OSError as e:
+        sys.stdout.write(TEXT)
+        jarvis_say(f"I could not start Claude Code, sir: {safe(str(getattr(e, 'strerror', '') or e))}.")
+        out()
+        return
     code = None
     while code is None:
         try:
-            code = subprocess.call([exe, "/login"])
-        except KeyboardInterrupt:
-            code = 0
-        except OSError as e:
-            sys.stdout.write(TEXT)
-            jarvis_say(f"I could not start Claude Code, sir: {safe(str(getattr(e, 'strerror', '') or e))}.")
-            out()
-            return
+            code = proc.wait()
+        except KeyboardInterrupt:                        # Ctrl+C also reaches Claude Code: just wait for it to close
+            continue
     sys.stdout.write(BG + TEXT)
     sys.stdout.flush()
     out()

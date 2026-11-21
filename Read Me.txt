@@ -1,4 +1,4 @@
-JARVIS POWERSHELL  -  modular version 3.3.1 (Screen Watch + Claude Code bridge)
+JARVIS POWERSHELL  -  modular version 3.3.2 (Screen Watch + Claude Code bridge)
 Author: DreeMux
 License: GNU GPL v3 or later (see LICENSE and NOTICE)
 
@@ -54,8 +54,9 @@ NOTES:
     folder, so that the guard points to the new files.
 
 WHAT'S NEW IN THIS VERSION
-  - New start-up animation with a loading bar.
-  - New command: claude /login (sign in to Claude Code without leaving Jarvis).
+  - Security patch: the built-in security scan no longer flags getattr() on subprocess (the two Windows flags are now plain numbers). The "maintenance" self-test passes 203 of 203.
+  - "claude /login" is now registered with the security scan as an allowed call that only runs when YOU type it.
+  - Otherwise the same as 3.3.1.
 
 JARVIS START-UP (new in 3.3.1):  the ASCII world spins, then shrinks; under the J.A.R.V.I.S. title a small loading bar
   fills up to 100% during the animation.
@@ -105,6 +106,3 @@ CLAUDE CODE BRIDGE (new in 3.2.0):  when you talk to Jarvis and the request is n
   The voice stays off at start-up: to hear the answers say  voice on.
   Optional variables:  JARVIS_CLAUDE_MODEL  (fixes the model),  JARVIS_CLAUDE_TIMEOUT  (seconds, default 180),
   JARVIS_CLAUDE_BIN  (path to the CLI),  JARVIS_CLAUDE_ARGS  (extra arguments).
-
-KNOWN ISSUE (fixed in 3.3.2):  the "maintenance" self-test reports 201 of 203 passed. The built-in security scan
-  flags a getattr() on subprocess (a constant looked up by name). Nothing breaks, but the scan is not clean.
