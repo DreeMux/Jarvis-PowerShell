@@ -1963,10 +1963,16 @@ def jv_open_request(orig, t, sel):
     pre = r"^(?:(?:please|pls|per favore|per piacere)[,\s]+)?(?:(?:can|could|would|will) you(?: please)?\s+|" \
           r"(?:puoi|potresti|mi puoi|mi potresti)\s+)?"
     m = re.match(pre + r"(open|apri(?:mi)?|view|read|leggi(?:mi)?|display|show me|show|mostrami|mostra|guarda|"
-                       r"look at|check out|select|choose|pick|use|seleziona|scegli)\s+(.+)$", orig, re.I)
+                       r"look at|check out|select|choose|pick|use|seleziona|scegli|"
+                       r"launch|start|play|run|avvia(?:mi)?|lancia(?:mi)?|esegui|fai partire|fammi giocare a|"
+                       r"giocare a|gioca a|gioca)\s+(.+)$", orig, re.I)
     if not m:
         return False
     verb, rest = m.group(1).lower(), m.group(2).strip()
+    if verb in ("launch", "start", "play", "run", "avvia", "avviami", "lancia", "lanciami", "esegui", "fai partire",
+                "fammi giocare a", "giocare a", "gioca a", "gioca"):
+        # only a game of this PC, and only when spoken to Jarvis by name; anything else is not for this handler
+        return bool(CONTESTO.get("jv_named") and jv_launch_try(rest))
     if verb in ("select", "choose", "pick", "use", "seleziona", "scegli"):
         mode = "select"
     elif verb in ("read", "leggi", "leggimi"):
@@ -2021,7 +2027,9 @@ def jv_open_request(orig, t, sel):
         else:
             jarvis_say("Say 'list' to see what is here.")
         return True
-    if mode == "select":
+    if mode == "open" and CONTESTO.get("jv_named") and os.path.isfile(pay):
+        jv_launch_file(pay)                           # 'jarvis open <file>' really opens the file
+    elif mode == "select":
         jv_open_view(pay, select_only=True)
     elif mode == "read" and os.path.isfile(pay) and detect_kind(pay).startswith("Text file"):
         CONTESTO["file"] = os.path.abspath(pay)
@@ -3365,13 +3373,20 @@ def jv_deep(orig, t, sel):
         return True
 
 
+# the word 'jarvis' on its own (not inside jarvis.py, jarvis_update, a path...)
+JV_NAMED_RE = r"(?<![\w./\\-])jarvis(?![\w/\\-]|\.\w)"
+JV_NOT_NAMED_CMDS = ("jarvis", "implement", "implement-jarvis", "maintenance", "help", "get-help", "man", "exit", "quit")
+
+
 def jarvis_interpret(texto):
     """Map a plain-language request (English or Italian) to a read-only command.
     Returns True if it understood and handled the request."""
-    CONTESTO["jv_named"] = bool(re.match(r"^(?:(?:hey|ok|okay|hi|hello|ciao)[,\s]+)?jarvis\b", texto.strip(), re.I)) \
-        or bool(CONTESTO.get("jv_cmd"))
-    orig = re.sub(r"^(?:(?:hey|ok|okay|hi|hello|ciao)[,\s]+)?jarvis\b[,:!\s]*", "",
+    # the word 'jarvis' counts anywhere in the sentence ('apri cry of fear jarvis', 'ehi jarvis apri ...')
+    CONTESTO["jv_named"] = bool(re.search(JV_NAMED_RE, texto, re.I)) or bool(CONTESTO.get("jv_cmd"))
+    orig = re.sub(r"^(?:(?:hey|ok|okay|hi|hello|ciao|ehi|ehy)[,\s]+)?jarvis\b[,:!\s]*", "",
                   texto.strip(), flags=re.I)
+    orig = re.sub(JV_NAMED_RE, " ", orig, flags=re.I)
+    orig = re.sub(r"\s{2,}", " ", orig).strip(" ,;:")
     orig = orig.strip().rstrip("?!. ").strip()
     t = orig.lower()
     sel = CONTESTO.get("file")
@@ -4379,6 +4394,49 @@ def jv_launch_best(exes, names):
         return exes[0]
 
 
+JV_LAUNCH_NOTGAME = ("steamworks shared", "steam controller configs", "steam linux runtime", "proton", "steamvr",
+                     "common redist", "directx", "vcredist")
+
+
+def jv_launch_generic():
+    """Games that are not GameMaker: every sub-folder of the game libraries that holds a program
+    (searched in the folder itself, then one and two levels below). {key: game}."""
+    res = {}
+    for lib in game_locations() + jv_launch_extra_dirs():
+        try:
+            subs = sorted(os.listdir(lib), key=str.lower)
+        except OSError:
+            continue
+        for n in subs:
+            root = os.path.join(lib, n)
+            if not os.path.isdir(root) or skip_dir(root) or n.lower().startswith(JV_LAUNCH_NOTGAME):
+                continue
+            key = os.path.normcase(os.path.realpath(root))
+            if key in res:
+                continue
+            exes, winexe = [], False
+            base = root.rstrip(os.sep).count(os.sep)
+            for cur, ds, _fs in os.walk(root, onerror=lambda e: None):
+                depth = cur.rstrip(os.sep).count(os.sep) - base
+                ds[:] = [] if depth >= 2 else sorted(d for d in ds if not skip_dir(os.path.join(cur, d)))
+                exes = jv_launch_exes(cur)
+                if exes:
+                    break
+            if exes:
+                best = jv_launch_best(exes, [n])
+                res[key] = {"name": n, "alt": "", "root": root, "wins": [], "dirs": [],
+                            "parts": [("launcher", best, None)], "winexe": False, "generic": True}
+            elif os.name != "nt":
+                try:
+                    winexe = any(f.lower().endswith(".exe") for f in os.listdir(root))
+                except OSError:
+                    pass
+                if winexe:
+                    res[key] = {"name": n, "alt": "", "root": root, "wins": [], "dirs": [],
+                                "parts": [], "winexe": True, "generic": True}
+    return res
+
+
 def jv_launch_games(force=False):
     """Installed games, one per game folder (chapter folders are grouped under their parent):
     {name, alt, root, wins, parts:[(label, exe, chapter)], winexe}."""
@@ -4414,6 +4472,9 @@ def jv_launch_games(force=False):
                 g["winexe"] = any(n.lower().endswith(".exe") for n in os.listdir(g["root"]))
             except OSError:
                 pass
+    for key, g in jv_launch_generic().items():           # every other game (Cry of Fear, ...)
+        if key not in roots:
+            roots[key] = g
     games = sorted(roots.values(), key=lambda g: g["name"].lower())
     CONTESTO["jv_launch_cache"] = (time.time(), games)
     return games
@@ -4452,7 +4513,7 @@ def jv_launch_run(game, part):
     real_root = os.path.normcase(os.path.realpath(game["root"]))
     real_exe = os.path.normcase(os.path.realpath(exe))
     if not (real_exe.startswith(real_root + os.sep) and os.path.exists(exe)
-            and any(os.path.isfile(w) for w in game["wins"])):
+            and (game.get("generic") or any(os.path.isfile(w) for w in game["wins"]))):
         jarvis_say(f"I won't start that, sir: it is not inside the folder of a game I know ({name}).")
         return
     if os.name != "nt" and exe.lower().endswith(".exe"):
@@ -4512,6 +4573,58 @@ def jv_launch_start(game, chapter):
         jarvis_say("Say 'jarvis open 1', 'jarvis open 2'... or 'jarvis open <game> chapter 2'.")
         return
     jv_launch_run(game, parts[0])
+
+
+def jv_launch_blocked(path):
+    """Why this file must not be opened (Windows internal / system files), or None when it is fine."""
+    full = os.path.normcase(os.path.realpath(path))
+    if os.name == "nt":
+        roots = [os.environ.get("SystemRoot"), os.environ.get("windir")]
+        for r in roots:
+            if r:
+                rr = os.path.normcase(os.path.realpath(r))
+                if full == rr or full.startswith(rr + os.sep):
+                    return "it is inside the Windows system folder"
+        try:
+            if os.stat(path).st_file_attributes & 0x4:        # FILE_ATTRIBUTE_SYSTEM
+                return "it is marked as a Windows system file"
+        except OSError:
+            pass
+        if os.path.splitext(full)[1] in (".sys", ".dll", ".drv", ".mui", ".cat", ".cpl", ".ocx"):
+            return "it is an internal Windows component file"
+    else:
+        for d in PSEUDO_DIRS | {"/boot", "/etc"}:
+            if full == d or full.startswith(d + os.sep):
+                return "it is a system file"
+    return None
+
+
+def jv_launch_file(path):
+    """'jarvis open <file>': open any file with its normal program, except Windows internal ones."""
+    full = os.path.abspath(path)
+    name = safe(os.path.basename(full))
+    why = jv_launch_blocked(full)
+    if why:
+        jarvis_say(f"I won't open {name}, sir: {why}.")
+        return
+    import subprocess
+    ack(f"Opening {name} with its usual program.")
+    out(f"  {safe(full)}", GRAY)
+    try:
+        if os.name == "nt":
+            os.startfile(full)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", full], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", full], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as e:
+        jarvis_say(f"It would not open, sir ({safe(e.strerror or e)}). There may be no program set for this file type.")
+        return
+    CONTESTO["file"] = full
+    CONTESTO["jlast"] = {"path": full, "sel": full}
+    out()
 
 
 def jv_launch_try(rest):
@@ -4585,6 +4698,9 @@ def esegui(riga):
         return
     nome = token[0]
     fn = CMDLETS.get(nome.lower())
+    if fn is not None and nome.lower() not in JV_NOT_NAMED_CMDS and re.search(JV_NAMED_RE, riga, re.I):
+        if jarvis_interpret(riga):          # 'jarvis' somewhere in the line: Jarvis answers first
+            return
     if fn is None:
         if jarvis_interpret(riga):
             return
