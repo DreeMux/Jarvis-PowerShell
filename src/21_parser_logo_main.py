@@ -300,6 +300,8 @@ def main():
     if "--watch-daemon" in sys.argv[1:]:          # the background guard: no console, no Jarvis (see watch guard)
         jv_watch_daemon()
         return
+    if "--guard-install" in sys.argv[1:] or "--guard-remove" in sys.argv[1:]:     # one double click, Jarvis stays closed
+        sys.exit(jv_watch_guard_cli("--guard-remove" in sys.argv[1:]))
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")

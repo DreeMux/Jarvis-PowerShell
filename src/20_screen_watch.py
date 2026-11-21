@@ -598,14 +598,14 @@ def jv_watch_stop():
 # come back (mode 'hide'). Nothing is killed: 'hide' only takes the window off the screen, the program keeps running.
 # Speed: the viewer is noticed at the next look (every 0.25 s), the watcher wakes the shield at once, and while somebody is
 # watching the shield re-checks the windows every 0.05 s, so a window that opens can be seen for ~0.05 s at most.
-JV_SHIELD_MODES = ("hide", "minimize", "close", "off")
+JV_SHIELD_MODES = ("kill", "hide", "minimize", "close", "off")
 
 
 def jv_watch_shield_cfg(cfg):
-    """settings -> (mode, set of program names). Default: hide, firefox.exe."""
-    mode = str(cfg.get("shield_mode") or "hide").lower()
+    """settings -> (mode, set of program names). Default: kill, firefox.exe (the program is ended at once, no questions asked)."""
+    mode = str(cfg.get("shield_mode") or "kill").lower()
     if mode not in JV_SHIELD_MODES:
-        mode = "hide"
+        mode = "kill"
     apps = cfg.get("shield_apps")
     names = {str(a).lower() for a in apps if re.fullmatch(r"[\w .+-]{1,60}\.exe", str(a), re.I)} if isinstance(apps, list) else set()
     return mode, names or {"firefox.exe"}
@@ -634,6 +634,47 @@ def jv_watch_winapi():
         u32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
         cache = {"t": 0.0, "pid": {}}
         proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        class PE32(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
+                        ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                        ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                        ("szExeFile", ctypes.c_wchar * 260)]
+        k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PE32)]
+        k32.Process32FirstW.restype = wintypes.BOOL
+        k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PE32)]
+        k32.Process32NextW.restype = wintypes.BOOL
+        k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        k32.TerminateProcess.restype = wintypes.BOOL
+
+        def kill(names):
+            """Ends every running process whose program name is in 'names' (TerminateProcess: instant, no 'save?' question).
+            Only processes of the same user can be ended. Returns how many were ended."""
+            h = k32.CreateToolhelp32Snapshot(2, 0)                         # TH32CS_SNAPPROCESS
+            if not h or h == ctypes.c_void_p(-1).value:
+                return 0
+            pids = []
+            try:
+                e = PE32()
+                e.dwSize = ctypes.sizeof(PE32)
+                ok = k32.Process32FirstW(h, ctypes.byref(e))
+                while ok:
+                    if e.szExeFile.lower() in names:
+                        pids.append(e.th32ProcessID)
+                    ok = k32.Process32NextW(h, ctypes.byref(e))
+            finally:
+                k32.CloseHandle(h)
+            n = 0
+            for pid in pids:
+                ph = k32.OpenProcess(0x0001, False, pid)                   # PROCESS_TERMINATE
+                if ph:
+                    if k32.TerminateProcess(ph, 1):
+                        n += 1
+                    k32.CloseHandle(ph)
+            return n
 
         def exe_of(hwnd):
             pid = wintypes.DWORD(0)
@@ -666,6 +707,7 @@ def jv_watch_winapi():
             return found
         return types.SimpleNamespace(
             windows=windows,
+            kill=kill,
             hide=lambda h: u32.ShowWindow(h, 0),                   # SW_HIDE
             show=lambda h: u32.ShowWindow(h, 5),                   # SW_SHOW
             minimize=lambda h: u32.ShowWindow(h, 6),               # SW_MINIMIZE
@@ -677,8 +719,8 @@ def jv_watch_winapi():
 
 
 def jv_watch_shield_step(api, mode, apps, present, state, now=None):
-    """One tick of the shield. state = {'hidden': set of handles, 'sent': {handle: time}}. Returns how many windows
-    were hidden / minimised / asked to close now (or brought back, as a negative number)."""
+    """One tick of the shield. state = {'hidden': set of handles, 'sent': {handle: time}}. Returns how many processes were
+    ended (mode 'kill') or windows hidden / minimised / asked to close now (or brought back, as a negative number)."""
     now = time.time() if now is None else now
     n = 0
     if state["hidden"] and (not present or mode != "hide"):       # nobody is watching (or another mode): give them back
@@ -687,7 +729,9 @@ def jv_watch_shield_step(api, mode, apps, present, state, now=None):
                 api.show(h)
                 n -= 1
             state["hidden"].discard(h)
-    if present and mode in ("hide", "minimize", "close"):
+    if present and mode == "kill":                                 # no hiding, no asking: the program is ended on the spot
+        n += api.kill(apps)
+    elif present and mode in ("hide", "minimize", "close"):
         for h in api.windows(apps):
             if mode == "hide":
                 api.hide(h)
@@ -713,7 +757,7 @@ def jv_watch_shield_loop(stop):
     api = st["api"] = st["api"] or jv_watch_winapi()
     if api is None:
         return
-    mode, apps, t_cfg, quiet = "hide", {"firefox.exe"}, 0.0, False
+    mode, apps, t_cfg, quiet = "kill", {"firefox.exe"}, 0.0, False
     while not stop.is_set():
         try:
             if time.time() - t_cfg > 1:                            # settings are re-read every second ('watch shield ...' is live)
@@ -724,7 +768,7 @@ def jv_watch_shield_loop(stop):
             with st["shield_lock"]:
                 n = jv_watch_shield_step(api, mode, apps, present, st["shield"])
             if n > 0:
-                jv_upd_log(f"screen watch shield: {mode} {n} window(s) of {', '.join(sorted(apps))}")
+                jv_upd_log(f"screen watch shield: {mode} {n} item(s) of {', '.join(sorted(apps))}")
             busy = present or bool(st["shield"]["hidden"])
         except Exception:
             busy = False                                           # the shield never dies because of one bad tick
@@ -752,9 +796,9 @@ def jv_watch_shield_cmd(rest, cfg):
     word = rest[0].lower() if rest else ""
     mode, apps = jv_watch_shield_cfg(cfg)
     if not word:
-        jarvis_say(f"The shield is {'OFF' if mode == 'off' else 'ON'}, sir: while someone is watching, I {mode} the windows of "
-                   + ", ".join(sorted(apps)) + ".")
-        out("  watch shield hide | minimize | close | off      what to do with the windows (default: hide)", GRAY)
+        jarvis_say(f"The shield is {'OFF' if mode == 'off' else 'ON'}, sir: while someone is watching, I "
+                   + ("END the programs " if mode == "kill" else f"{mode} the windows of ") + ", ".join(sorted(apps)) + ".")
+        out("  watch shield kill | hide | minimize | close | off   what to do (default: kill = end the program at once)", GRAY)
         out("  watch shield add <program.exe> | del <program.exe>   which programs (default: firefox.exe)", GRAY)
         out("  watch shield show                               bring the hidden windows back right now", GRAY)
         out()
@@ -941,6 +985,24 @@ def jv_watch_daemon(max_loops=None):
     jv_upd_log("screen watch guard stopped")
 
 
+def jv_watch_guard_cli(remove=False):
+    """pwsh.py --guard-install / --guard-remove: turns the guard on or off WITHOUT opening Jarvis (used by INSTALLA_GUARDIA.bat).
+    Returns the exit code."""
+    if os.name != "nt":
+        print("The guard works only on Windows.")
+        return 1
+    if remove:
+        stopped = jv_watch_guard_stop()
+        err = jv_watch_guard_uninstall()
+        print(("Guard removed: it will not start with Windows any more." + (" It was stopped." if stopped else "")) if not err
+              else "Could not remove the guard: " + err)
+    else:
+        err = jv_watch_guard_install() or jv_watch_guard_start()
+        print("Guard installed and running. From now on it starts with Windows, even if Jarvis is never opened." if not err
+              else "Could not install the guard: " + err)
+    return 1 if err else 0
+
+
 def jv_watch_guard_cmd(rest, cfg):
     word = rest[0].lower() if rest else ""
     if os.name != "nt":
@@ -981,14 +1043,15 @@ watch mail off | test
 watch guard                    always-on guard: status (it watches even when Jarvis is closed)
 watch guard on | off           start it with Windows (and now) / remove it
 watch guard start | stop       run it now / stop it until the next Windows login
-watch shield                   Firefox shield: while someone watches, Firefox is hidden at once (on by default)
-watch shield hide | minimize | close | off    what to do with it      watch shield show: bring it back now
+watch shield                   Firefox shield: while someone watches, Firefox is ended at once (on by default)
+watch shield kill | hide | minimize | close | off    what to do with it (default kill = ended at once)      watch shield show: bring hidden windows back
 watch shield add <program.exe> | del <program.exe>    other programs to shield too
 Read-only: it only reads the session list, open connections, process list and window titles.
 On a sighting Jarvis pauses at its next output and a red WARNING window opens; ENTER resumes, F shows the
 viewer a SIMULATED intrusion screen (text only). The pause always ends by itself after at most 15 minutes.
-The shield is the one thing that acts on other programs: it hides their windows (nothing is closed or killed unless you
-choose 'close'); everything is brought back when the viewer leaves or Jarvis / the guard closes.""")
+The shield is the one thing that acts on other programs: by default it ENDS Firefox at once (unsaved tabs are not saved by
+Jarvis; Firefox's own session restore usually brings them back). Choose 'hide' to only take the windows off the screen
+(they come back when the viewer leaves) or 'minimize' / 'close' / 'off'.""")
 def jv_watch_cmd(args):
     """Notice who is watching the shared / remote screen: pauses Jarvis and opens a WARNING window."""
     CONTESTO["watchcmd"] = True
