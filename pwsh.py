@@ -25,6 +25,9 @@ updates/ and backups/ next to it, and only through the self-update system:
     maintenance            health check + validation of pending updates (changes nothing)
     maintenance -Prepare   make updates/pwsh_next.py (a copy with the version bumped)
     implement jarvis       validate the newest update in updates/ and install it
+    improve <request>      JARVIS writes new code for himself with a FREE local model (Ollama): no key,
+                           no cost, nothing leaves this PC. It is saved in updates/ and is NEVER installed
+                           without 'implement jarvis'
     implement jarvis -DryRun | -Rollback | <file>
 Optional: pip install psutil  (live memory/CPU of a running game in pluton.key).
 Optional extensions: put .py files in a folder named ext/ next to this file.
@@ -1638,7 +1641,7 @@ def jarvis_interpret(texto):
         ack("Running maintenance: health check and pending updates.")
         esegui("maintenance")
         return True
-    if re.match(r"implement\s+jarvis\b", t):
+    if re.match(r"(implement\s+jarvis|improve|evolve|migliora)\b", t):
         esegui(orig)
         return True
     if has("status", "stato"):
@@ -1743,7 +1746,7 @@ def jarvis_cmd(args):
 # WRITER_FUNCS / PROC_FUNCS below. Every candidate update is checked by the static rules
 # (rule_violations) and run through a self-test BEFORE it can replace this file. These checks are
 # guardrails against mistakes, not a sandbox: only install updates you trust.
-__version__ = "1.1.0"
+__version__ = "1.3.0"
 
 APP_PATH = os.path.abspath(__file__)
 APP_DIR = os.path.dirname(APP_PATH)
@@ -1755,9 +1758,26 @@ SELFTEST_TIMEOUT = 30
 
 REQUIRED_FUNCS = {"main", "esegui", "cmdlet", "jarvis_interpret", "static_checks", "rule_violations",
                   "validate_update", "apply_update", "restore_backup", "jarvis_implement",
-                  "reject_and_respawn", "selftest"}
+                  "reject_and_respawn", "selftest", "ask_model", "list_models", "core_fingerprint"}
 REQUIRED_CMDLETS = {"extract.port", "interact.port", "denux.hunter", "undersopic.key", "pluton.key",
-                    "Jarvis", "Implement", "Maintenance", "Get-Help", "Exit"}
+                    "Jarvis", "Implement", "Maintenance", "Improve", "Get-Help", "Exit"}
+# The only network access JARVIS has: two functions talking to the local Ollama server on THIS
+# computer (loopback). No internet address is allowed. Generated code cannot add others.
+NET_FUNCS = {"ask_model", "list_models", "_local_opener"}
+NET_ROOTS = {"urllib", "ssl", "http"}
+OLLAMA = "http://127.0.0.1:11434"
+ALLOWED_URLS = {"http://127.0.0.1:11434", "http://127.0.0.1:11434/api/chat", "http://127.0.0.1:11434/api/tags", "https://aka.ms/PSWindows"}
+DUNDER_BAD = {"__dict__", "__globals__", "__builtins__", "__subclasses__", "__bases__", "__mro__", "__code__"}
+# The safety core: a generated patch may never change these (only 'implement jarvis -Core', typed by you).
+PROTECTED_NAMES = {"BANNED_IMPORTS", "BANNED_CALLS", "BANNED_PAIRS", "FS_MUTATORS", "FS_ATTRS", "PROC_OS",
+                   "GUARDED_ROOTS", "WRITER_FUNCS", "PROC_FUNCS", "NET_FUNCS", "NET_ROOTS", "ALLOWED_URLS",
+                   "DUNDER_BAD", "REQUIRED_FUNCS", "REQUIRED_CMDLETS", "PROTECTED_NAMES", "PROTECTED_DEFS",
+                   "MAX_UPDATE", "CONFIRM_SECONDS", "APP_PATH", "UPD_DIR", "BAK_DIR", "SANDBOX_BOOT", "OLLAMA"}
+PROTECTED_DEFS = {"_RuleVisitor", "rule_violations", "_declared_version", "static_checks", "core_fingerprint",
+                  "selftest_candidate", "validate_update", "write_atomic", "inside_updates", "archive_candidate",
+                  "discard_candidate", "restore_backup", "apply_update", "restart_same_window", "respawn_window",
+                  "ask_timeout", "reject_and_respawn", "jarvis_implement", "implement_cmd", "ask_model", "list_models", "_local_opener",
+                  "file_sha", "ver_tuple", "selftest"}
 BANNED_IMPORTS = {"socket", "urllib", "urllib2", "http", "ftplib", "smtplib", "telnetlib", "requests",
                   "xmlrpc", "ssl", "webbrowser", "pickle", "marshal", "importlib", "imp", "builtins"}
 BANNED_CALLS = {"eval", "exec", "compile", "__import__"}
@@ -1770,7 +1790,7 @@ FS_ATTRS = {"unlink", "write_text", "write_bytes", "rmdir", "touch", "mkdir", "r
 PROC_OS = {"_exit", "execv", "execl", "execvp", "execlp", "spawnl", "spawnv"}
 GUARDED_ROOTS = {"os", "shutil", "subprocess"}
 WRITER_FUNCS = {"write_atomic", "apply_update", "restore_backup", "archive_candidate",
-                "discard_candidate", "prepare_candidate", "selftest_candidate"}
+                "discard_candidate", "prepare_candidate", "selftest_candidate", "save_candidate"}
 PROC_FUNCS = {"battery_info", "selftest_candidate", "respawn_window", "restart_same_window"}
 
 
@@ -1808,23 +1828,41 @@ class _RuleVisitor(ast.NodeVisitor):
     def visit_Import(self, node):
         for a in node.names:
             root = a.name.split(".")[0]
-            if root in BANNED_IMPORTS:
+            if root in BANNED_IMPORTS and not (root in NET_ROOTS and self.where() in NET_FUNCS):
                 self.add(node, f"forbidden module '{root}'")
             if root in GUARDED_ROOTS and a.asname:
                 self.add(node, f"aliased import of '{root}'")
 
     def visit_ImportFrom(self, node):
         root = (node.module or "").split(".")[0]
-        if root in BANNED_IMPORTS:
+        if root in BANNED_IMPORTS and not (root in NET_ROOTS and self.where() in NET_FUNCS):
             self.add(node, f"forbidden module '{root}'")
         elif root in GUARDED_ROOTS:
             self.add(node, f"'from {root} import ...' is not allowed (use {root}.name)")
 
+    def visit_Constant(self, node):
+        if isinstance(node.value, str):
+            for u in re.findall(r"https?://[^\s\"'<>)]+", node.value):
+                if u.rstrip(".,;") not in ALLOWED_URLS:
+                    self.add(node, f"web address not on the allowlist: {u[:60]}")
+
+    def visit_Attribute(self, node):
+        if node.attr in DUNDER_BAD:
+            self.add(node, f"access to {node.attr}")
+        self.generic_visit(node)
+
+    def visit_Name(self, node):
+        if node.id == "__builtins__":
+            self.add(node, "access to __builtins__")
+
     def visit_Call(self, node):
         f, where = node.func, self.where()
         if isinstance(f, ast.Name):
-            if f.id in BANNED_CALLS:
+            if f.id in BANNED_CALLS or f.id in ("globals", "vars", "locals"):
                 self.add(node, f"call to {f.id}()")
+            elif (f.id in ("getattr", "setattr", "delattr", "hasattr") and node.args
+                  and isinstance(node.args[0], ast.Name) and node.args[0].id in GUARDED_ROOTS | {"sys", "builtins"}):
+                self.add(node, f"{f.id}() on module '{node.args[0].id}'")
             elif f.id == "open":
                 mode = node.args[1] if len(node.args) > 1 else next(
                     (k.value for k in node.keywords if k.arg == "mode"), None)
@@ -1863,7 +1901,20 @@ def _declared_version(tree):
     return None
 
 
-def static_checks(path, current_version=None):
+def core_fingerprint(tree):
+    """{name: structure} of every protected constant/function/class, independent of line numbers."""
+    fp = {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name) and t.id in PROTECTED_NAMES:
+                    fp[t.id] = ast.dump(n.value)
+        elif isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in PROTECTED_DEFS:
+            fp[n.name] = ast.dump(n)
+    return fp
+
+
+def static_checks(path, current_version=None, baseline=None, allow_core=False):
     """Phases 1-5 (nothing is executed). Returns [(phase, ok, detail)]."""
     res = []
     try:
@@ -1907,6 +1958,18 @@ def static_checks(path, current_version=None):
                 "all core functions, commands and safeguards are present" if not missing
                 else "missing: " + ", ".join(missing)))
 
+    if baseline and not allow_core:
+        try:
+            with open(baseline, "rb") as f:
+                old_fp = core_fingerprint(ast.parse(f.read()))
+            new_fp = core_fingerprint(tree)
+            changed = sorted(k for k in old_fp if new_fp.get(k) != old_fp[k])
+            res.append(("Safety core", not changed,
+                        "the validation/backup/update machinery is unchanged" if not changed
+                        else "it changes the protected safety core: " + ", ".join(changed[:8])))
+        except (OSError, SyntaxError, ValueError) as e:
+            res.append(("Safety core", False, f"cannot compare with the installed version ({safe(e)})"))
+
     bad = rule_violations(tree)
     res.append(("Safety rules", not bad,
                 "no forbidden code" if not bad
@@ -1914,30 +1977,64 @@ def static_checks(path, current_version=None):
     return res
 
 
+SANDBOX_BOOT = r"""
+import os, sys, runpy
+tmp, script = os.path.realpath(sys.argv[1]), sys.argv[2]
+W = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+BLOCK = ("socket.", "subprocess.", "os.system", "os.exec", "os.spawn", "os.fork", "os.posix_spawn",
+         "os.remove", "os.rename", "os.rmdir", "os.mkdir", "os.chmod", "os.truncate", "os.symlink",
+         "os.link", "shutil.", "ctypes.", "winreg.", "webbrowser.", "urllib.", "http.", "ftplib.", "smtplib.")
+def hook(event, args):
+    if event.startswith(BLOCK):
+        raise PermissionError("sandbox: blocked " + event)
+    if event == "open" and len(args) >= 3:
+        path, mode, flags = args[0], args[1], args[2]
+        writing = (isinstance(mode, str) and any(c in mode for c in "wax+")) or (isinstance(flags, int) and flags & W)
+        if writing and isinstance(path, (str, bytes, os.PathLike)):
+            p = os.path.realpath(os.fsdecode(path))
+            if p != os.path.realpath(os.devnull) and not p.startswith(tmp + os.sep):
+                raise PermissionError("sandbox: blocked write to " + p)
+sys.addaudithook(hook)
+try:
+    import resource
+    resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
+    resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (10 << 20, 10 << 20))
+except Exception:
+    pass
+sys.argv = [script, "--selftest"]
+runpy.run_path(script, run_name="__main__")
+"""
+
+
 def selftest_candidate(path):
-    """Phase 6: run the candidate's own --selftest in an isolated interpreter and a throw-away folder."""
+    """Last phase: run the candidate's own --selftest in a SANDBOX: throw-away folder, minimal environment,
+    CPU/memory limits and an audit hook that blocks network, other programs, deleting and writing outside it."""
+    keep = ("PATH", "SYSTEMROOT", "TEMP", "TMP", "LANG", "LC_ALL")
+    env = {k: os.environ[k] for k in keep if k in os.environ}
+    env["PYTHONIOENCODING"] = "utf-8"
     try:
         with tempfile.TemporaryDirectory(prefix="jarvis_selftest_") as tmp:
             dst = os.path.join(tmp, "pwsh.py")
             with open(path, "rb") as s, open(dst, "wb") as d:
                 d.write(s.read())
-            r = subprocess.run([sys.executable, "-I", dst, "--selftest"], cwd=tmp, stdin=subprocess.DEVNULL,
-                               capture_output=True, text=True, encoding="utf-8", errors="replace",
-                               timeout=SELFTEST_TIMEOUT)
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", SANDBOX_BOOT, tmp, dst], cwd=tmp, env=env,
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=SELFTEST_TIMEOUT)
     except subprocess.TimeoutExpired:
         return [("Self-test", False, f"timed out after {SELFTEST_TIMEOUT} s")]
     except OSError as e:
         return [("Self-test", False, f"could not run it ({safe(e)})")]
     ok = r.returncode == 0 and "SELFTEST-OK" in r.stdout
     if ok:
-        return [("Self-test", True, "the new version starts and passes its own checks")]
+        return [("Self-test", True, "sandboxed run: the new version starts and passes its own checks")]
     tail = (r.stderr.strip() or r.stdout.strip()).splitlines()[-4:]
     return [("Self-test", False, safe(" | ".join(tail)) or f"exit code {r.returncode}")]
 
 
-def validate_update(path, require_newer=True):
-    """All six phases. The candidate is only EXECUTED (phase 6) if phases 1-5 passed."""
-    phases = static_checks(path, __version__ if require_newer else None)
+def validate_update(path, require_newer=True, allow_core=False):
+    """All phases. The candidate is only EXECUTED (the last one) if all the others passed."""
+    phases = static_checks(path, __version__ if require_newer else None, APP_PATH, allow_core)
     if all(p[1] for p in phases):
         phases += selftest_candidate(path)
     return all(p[1] for p in phases), phases
@@ -1958,6 +2055,8 @@ def selftest():
     # canaries: the rule checker must still catch bad code and accept clean code
     if not rule_violations(ast.parse("import socket\nos.remove('x')\neval('1')")):
         problems.append("rule checker no longer detects forbidden code")
+    if not rule_violations(ast.parse("x = 'ht" + "tps://evil.example/a'\ngetattr(os, 'remove')")):
+        problems.append("rule checker no longer detects stray web addresses / dynamic access")
     if rule_violations(ast.parse("x = 1\n")):
         problems.append("rule checker rejects harmless code")
     try:
@@ -2043,14 +2142,30 @@ def prepare_candidate():
     if os.path.exists(dst):
         return None
     with open(APP_PATH, "r", encoding="utf-8", newline="") as f:
-        src = f.read()
+        bumped = bump_version(f.read())
+    if not bumped:
+        return None
+    with open(dst, "w", encoding="utf-8", newline="") as f:
+        f.write(bumped[0])
+    return dst, bumped[1]
+
+
+def bump_version(src):
+    """(source with the patch number +1, new version) or None."""
     m = re.search(r'^__version__ = "(\d+)\.(\d+)\.(\d+)"', src, re.M)
     if not m:
         return None
     new = f"{m[1]}.{m[2]}.{int(m[3]) + 1}"
-    with open(dst, "w", encoding="utf-8", newline="") as f:
-        f.write(src[:m.start()] + f'__version__ = "{new}"' + src[m.end():])
-    return dst, new
+    return src[:m.start()] + f'__version__ = "{new}"' + src[m.end():], new
+
+
+def save_candidate(text):
+    """Write a generated candidate into updates/ (never over an existing file). Returns its path."""
+    os.makedirs(UPD_DIR, exist_ok=True)
+    dst = os.path.join(UPD_DIR, datetime.now().strftime("pwsh_ai_%Y%m%d_%H%M%S.py"))
+    with open(dst, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    return dst
 
 
 def restart_same_window():
@@ -2087,6 +2202,148 @@ def respawn_window():
         sys.stdout.flush()
         os._exit(0)
     restart_same_window()
+
+
+# ---- code generation: JARVIS writes new code for himself with a FREE local model (Ollama) ----
+IMPROVE_SYSTEM = (
+    "You write Python 3 code that is added to JARVIS, a single-file shell program. "
+    "Reply with ONE python code block and nothing else. The code must define one or more NEW commands "
+    "with the @cmdlet decorator, exactly like the example. Rules: standard library only; the command must be "
+    "read-only (never write, delete, move or execute files; no subprocess, no network, no eval/exec); "
+    "print with out(text, COLOR); use parse(args) for flags; keep it under 120 lines; "
+    "use group=\"Extensions\"; do not redefine existing functions or commands.")
+IMPROVE_EXAMPLE = '''@cmdlet("Count-Lines", "cl", group="Extensions", usage="count-lines <file>")
+def count_lines(args):
+    """Count the lines of a text file"""
+    flags, pos = parse(args)
+    if not pos:
+        out("Usage: count-lines <file>", YELLOW)
+        return
+    try:
+        with open(pos[0], encoding="utf-8", errors="replace") as f:
+            n = sum(1 for _ in f)
+    except OSError as e:
+        out(f"count-lines : cannot read the file ({e.strerror})", RED)
+        return
+    out(f"{n:,} line(s) in {safe(pos[0])}", GREEN)'''
+INSERT_MARKER = "# ---------------- PARSER E" + " LOOP ----------------"   # split so it occurs once in this file
+
+
+def _local_opener():
+    import urllib.request
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))     # never go through a proxy
+
+
+def list_models():
+    """Names of the models installed in the local Ollama server, or None if it is not running."""
+    try:
+        with _local_opener().open(OLLAMA + "/api/tags", timeout=3) as r:
+            return [m.get("name", "") for m in json.loads(r.read().decode("utf-8")).get("models", [])]
+    except (OSError, ValueError):
+        return None
+
+
+def ask_model(model, system, prompt):
+    """Ask the local Ollama server (this computer only, free, no key). Returns the reply text."""
+    import urllib.request
+    body = json.dumps({"model": model, "stream": False, "options": {"temperature": 0.2, "num_predict": 3000},
+                       "messages": [{"role": "system", "content": system},
+                                    {"role": "user", "content": prompt}]}).encode("utf-8")
+    req = urllib.request.Request(OLLAMA + "/api/chat", data=body, method="POST",
+                                 headers={"content-type": "application/json"})
+    try:
+        with _local_opener().open(req, timeout=900) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"the local model did not answer ({e})")
+    if data.get("done_reason") == "length":
+        raise RuntimeError("the reply was cut off (too long); ask for something smaller")
+    return (data.get("message") or {}).get("content", "")
+
+
+def extract_code(text):
+    m = re.search(r"```(?:python|py)?\s*\n(.*?)```", text, re.S)
+    code = (m.group(1) if m else text).strip("\n")
+    if "@cmdlet(" not in code:
+        raise ValueError("the reply contains no @cmdlet command")
+    if len(code.splitlines()) > 400:
+        raise ValueError("the generated code is too long")
+    return code
+
+
+def insert_code(source, code):
+    if source.count(INSERT_MARKER) != 1:
+        raise ValueError("cannot find the place where new commands are added")
+    return source.replace(INSERT_MARKER, "# ---- generated by JARVIS ----\n" + code.rstrip() + "\n\n\n" + INSERT_MARKER, 1)
+
+
+@cmdlet("Improve", "evolve", group="Assistant", usage="""improve <what you want>
+  improve a command that lists the 10 biggest files in a folder
+JARVIS asks a FREE model running on this PC (Ollama: ollama.com) to write the new command, adds it to a
+copy of himself in updates/ and validates it at once (sandboxed self-test included).
+If it breaks the safety phases the window self-destructs (type delete within 10 seconds to delete it).
+If it passes, it is only INSTALLED when you run:  implement jarvis
+Free, no account, no key, works offline: nothing leaves this computer.
+Setup (once): install Ollama, then e.g.  ollama pull qwen2.5-coder:7b   (any model you like works).
+Choose a model:  set JARVIS_MODEL=<name>   (default: the first installed one).""")
+def improve_cmd(args):
+    """JARVIS writes a new command for himself (free local model) and validates it; install with implement jarvis"""
+    _, pos = parse(args)
+    request = " ".join(pos).strip()
+    if not request:
+        out("Usage: improve <what you want JARVIS to add>", YELLOW)
+        out()
+        return
+    models = list_models()
+    if models is None:
+        jarvis_say("I cannot reach a local model, sir. Install Ollama (ollama.com), start it, pull a model "
+                   "(for example: ollama pull qwen2.5-coder:7b) and ask again. It is free and works offline.")
+        return
+    if not models:
+        jarvis_say("Ollama is running but has no model, sir. Try: ollama pull qwen2.5-coder:7b")
+        return
+    model = os.environ.get("JARVIS_MODEL", "").strip() or models[0]
+    if model not in models:
+        jarvis_say(f"The model '{safe(model)}' is not installed. Installed: {', '.join(safe(m) for m in models)}")
+        return
+    try:
+        with open(APP_PATH, "r", encoding="utf-8") as f:
+            source = f.read()
+    except OSError as e:
+        jarvis_say(f"I cannot read my own source ({safe(e)}).")
+        return
+    prompt = (f"Existing commands (do not reuse these names): {', '.join(sorted(NOMI, key=str.lower))}\n"
+              "Helpers you can call: out(text, color=None), parse(args) -> (flags, positional), safe(text), "
+              "human(num_bytes), detect_kind(path), colors YELLOW RED GREEN CYAN GRAY.\n\n"
+              f"Example of the format:\n```python\n{IMPROVE_EXAMPLE}\n```\n\nRequest: {request}")
+    ack(f"Asking the local model '{safe(model)}'. On a slow PC this can take a few minutes.")
+    try:
+        code = extract_code(ask_model(model, IMPROVE_SYSTEM, prompt))
+        bumped = bump_version(insert_code(source, code))
+        if bumped is None:
+            raise ValueError("the version line is missing")
+        new, ver = bumped
+        path = save_candidate(new)
+    except (RuntimeError, ValueError, OSError) as e:
+        jarvis_say(f"I could not produce usable code: {safe(e)}")
+        return
+    out()
+    out(f"Candidate v{ver} saved: {safe(path)}", CYAN)
+    out("  New code:", GRAY)
+    for line in code.splitlines()[:60]:
+        out("  + " + safe(line)[:150], GREEN)
+    if len(code.splitlines()) > 60:
+        out(f"  ... {len(code.splitlines()) - 60} more line(s); open the file to read them all", GRAY)
+    out()
+    ok, phases = validate_update(path)
+    show_phases(phases)
+    out()
+    if not ok:
+        reject_and_respawn(path, phases)
+        return
+    jarvis_say("The new code passed every safety phase. It is NOT installed yet. "
+               "Read it, then run  implement jarvis  to install it (the old version will be backed up).")
+    out()
 
 
 # ---- the interactive parts ----
@@ -2182,7 +2439,7 @@ def reject_and_respawn(src, phases):
     respawn_window()
 
 
-def jarvis_implement(src=None, dry=False, allow_older=False):
+def jarvis_implement(src=None, dry=False, allow_older=False, allow_core=False):
     """Validate an update and, if it passes every phase, install it (old version is backed up)."""
     if src is None:
         found = pending_updates()
@@ -2195,7 +2452,7 @@ def jarvis_implement(src=None, dry=False, allow_older=False):
         jarvis_say(f"I can't find the update file '{safe(src)}', sir.")
         return
     ack(f"Validating {safe(os.path.basename(src))} before touching anything.")
-    ok, phases = validate_update(src, require_newer=not allow_older)
+    ok, phases = validate_update(src, require_newer=not allow_older, allow_core=allow_core or allow_older)
     out()
     show_phases(phases)
     out()
@@ -2222,7 +2479,8 @@ def jarvis_implement(src=None, dry=False, allow_older=False):
 implement jarvis <file>           same, for a specific file
 implement jarvis -DryRun          only validate, install nothing
 implement jarvis -Rollback        go back to the latest backup in backups/
-Phases: file, syntax, version (must be newer), structure, safety rules, self-test.
+implement jarvis -Core            also allow changes to the safety machinery (you must type I ACCEPT)
+Phases: file, syntax, version (must be newer), structure, safety core, safety rules, self-test.
 If an update fails them, the window self-destructs and a fresh intact one opens
 (type delete within 10 seconds to also delete the rejected file).
 A copy of the old version is always kept in backups/.""")
@@ -2240,10 +2498,17 @@ def implement_cmd(args):
             return
         jarvis_implement(baks[0], allow_older=True)
         return
+    core = False
+    if "-core" in flags:
+        jarvis_say("-Core lets this update change the safety machinery itself. Only do it for code you wrote or reviewed.")
+        core = input("Type  I ACCEPT  to continue: ").strip() == "I ACCEPT"
+        if not core:
+            jarvis_say("Not confirmed, sir. Nothing was changed.")
+            return
     src = " ".join(pos[1:]) if len(pos) > 1 else None
     if src and not os.path.exists(src) and os.path.exists(os.path.join(UPD_DIR, src)):
         src = os.path.join(UPD_DIR, src)
-    jarvis_implement(src, dry="-dryrun" in flags)
+    jarvis_implement(src, dry="-dryrun" in flags, allow_core=core)
 
 
 @cmdlet("Maintenance", "update-jarvis", group="Assistant", usage="""maintenance             health check of JARVIS itself, extensions, backups and pending updates
@@ -2295,6 +2560,10 @@ def maintenance_cmd(args):
     except ImportError:
         out("  psutil                : not installed (pip install psutil for live memory/CPU)", GRAY)
     out(f"  Python                : {sys.version.split()[0]}")
+    models = list_models()
+    out("  Local model (Ollama)  : " + ("not running (needed only for: improve)" if models is None
+                                        else f"{len(models)} model(s) installed, improve is available"
+                                        if models else "running, but no model installed"))
     out()
     baks = list_backups()
     out("BACKUPS", YELLOW)
