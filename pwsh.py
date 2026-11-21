@@ -5213,11 +5213,13 @@ def carica_estensioni():
 
 
 def jv_hl(buf):
-    """Colors of the line while you type: the command yellow, quoted text blue, the rest normal."""
+    """Colors of the line while you type: the command yellow, the word jarvis cyan, quoted text blue, the rest normal."""
+    def words(t, back):
+        return re.sub(r"(?i)\bjarvis\b", lambda x: CYAN + x.group(0) + back, t)
     m = re.match(r"(\s*)(\S+)", buf)
-    res, i, q = "", 0, None
+    res, i, q, run = "", 0, None, ""
     if m:
-        res, i = m.group(1) + YELLOW + m.group(2) + TEXT, m.end()
+        res, i = m.group(1) + YELLOW + words(m.group(2), YELLOW) + TEXT, m.end()
     while i < len(buf):
         c = buf[i]
         if q:
@@ -5225,11 +5227,11 @@ def jv_hl(buf):
             if c == q:
                 res, q = res + TEXT, None
         elif c in "\"'":
-            res, q = res + BLUE + c, c
+            res, run, q = res + words(run, TEXT) + BLUE + c, "", c
         else:
-            res += c
+            run += c
         i += 1
-    return res + TEXT
+    return res + words(run, TEXT) + TEXT
 
 
 JV_HIST = []
