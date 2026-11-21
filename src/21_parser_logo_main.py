@@ -297,6 +297,9 @@ def jv_logo_show():
 
 
 def main():
+    if "--watch-daemon" in sys.argv[1:]:          # the background guard: no console, no Jarvis (see watch guard)
+        jv_watch_daemon()
+        return
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -309,6 +312,7 @@ def main():
     out("Copyright (C) DreeMux. Licensed under the GNU GPL v3 or later.")
     out()
     carica_estensioni()
+    jv_watch_start()
     jarvis_greeting()
     try:
         while True:
@@ -323,6 +327,7 @@ def main():
             esegui(riga)
     except SystemExit:
         pass
+    jv_watch_stop()
     jv_voice_flush()
     sys.stdout.write("\x1b[0m\x1b[2J\x1b[H")
 

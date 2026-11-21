@@ -1,5 +1,5 @@
 {
- "sha": "359b4f812f4efa9b2201819738eaf6041a9d530a3d5398a1b177ea4f219c927e",
+ "sha": "3c27349b9091b9379f2e31746c300604b573a7f4c33e78db572b760340c04aff",
  "parts": [
   "01_core.py",
   "02_basic_cmdlets_helpers.py",
@@ -20,6 +20,7 @@
   "17_implement_jarvis.py",
   "18_maintenance.py",
   "19_browser_mode.py",
+  "20_screen_watch.py",
   "20_voice.py",
   "21_parser_logo_main.py"
  ],
@@ -43,6 +44,7 @@
   "17_implement_jarvis.py": "# ---------------- implement jarvis ----------------",
   "18_maintenance.py": "# ---------------- maintenance (read-only health check) ----------------",
   "19_browser_mode.py": "# ---------------- browser mode: 'jarvis open chrome', then 'open email', 'open canva', 'open chrome account <name>' ----------------",
+  "20_screen_watch.py": "# ---------------- SCREEN WATCH: \"is someone watching my screen?\" ----------------",
   "20_voice.py": "# ---------------- VOICE (optional): JARVIS speaks only when you ask ----------------",
   "21_parser_logo_main.py": "# ---------------- PARSER E LOOP ----------------"
  },

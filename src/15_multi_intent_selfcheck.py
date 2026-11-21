@@ -831,6 +831,17 @@ JV_UPD_ALLOW = (
     ("jv_news_get", "urllib"), ("jv_news_get", "ssl"),      # the news reader's one read-only https door (online mode only)
     ("jv_web_get", "urllib"), ("jv_web_get", "ssl"),      # the one read-only https lookup (Wikipedia), online mode only
     ("steam_libraries", "winreg"),           # read-only: reads the Steam folder from the registry
+    ("jv_watch_run", "subprocess.run"),      # screen watch: read-only qwinsta / netstat / tasklist
+    ("jv_watch_windows", "ctypes"),          # screen watch: reads the titles of the visible windows
+    ("jv_watch_box_fallback", "ctypes"),     # screen watch: plain message box if the Tk window cannot open
+    ("jv_watch_mail", "smtplib"), ("jv_watch_mail", "ssl"),   # screen watch: optional alert e-mail to YOU (SMTP over TLS)
+    ("jv_watch_save", ".makedirs"), ("jv_watch_save", "os.makedirs"), ("jv_watch_save", "open-write"),   # screen watch: its tiny settings file in jarvis_update/
+    ("jv_watch_beat", "open-write"),                                    # background guard: heartbeat files in jarvis_update/
+    ("jv_watch_guard_install", "open-write"),                           # background guard: the one launcher file in the Startup folder
+    ("jv_watch_guard_uninstall", "os.remove"),                          # ...and removing exactly that file again
+    ("jv_watch_guard_start", "os.remove"), ("jv_watch_guard_start", "subprocess.Popen"),   # clear the stop flag; start the hidden guard
+    ("jv_watch_guard_stop", "open-write"),                              # the stop flag the guard looks for
+    ("jv_watch_daemon", "os.remove"),                                   # the guard removes its own stop flag
 )
 JV_LAUNCH_SKIP = ("unins", "uninstall", "setup", "install", "redist", "vcredist", "dxsetup", "crash", "report",
                   "helper", "updater", "update", "dotnet", "directx", "vc_", "oalinst", "cleanup", "config")

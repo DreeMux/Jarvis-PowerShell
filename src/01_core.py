@@ -31,6 +31,7 @@ While online (jarvis be online): 'jarvis search <topic>' also asks Wikipedia (ht
 Optional: pip install psutil  (live memory/CPU of a running game in pluton.key).
 Optional voice: pip install pyttsx3, then 'voice on' / 'voice off' (local, offline, free; silent until you ask).
 Launch a local script or program: 'launch <file> [arguments]' (no shell, never asks for administrator rights).
+Screen watch: 'watch' (on by default, Windows) notices who is watching the shared / remote screen, pauses Jarvis and opens a WARNING window.
 Optional extensions: put .py files in a folder named ext/ next to this file.
 """
 
@@ -93,6 +94,9 @@ except ImportError:
 CMDLETS = {}      # nome minuscolo -> funzione
 NOMI = {}         # nome canonico -> funzione (per Get-Command)
 CONTESTO = {"riga": ""}
+JV_RUN = threading.Event()   # set = Jarvis runs; cleared by the screen watch: the main thread stops at its next output
+JV_RUN.set()
+JV_HOLD_MAX = 900            # seconds: the longest the screen watch can ever hold Jarvis (failsafe)
 
 
 ALIASES, GROUPS, USAGE = {}, {}, {}
@@ -114,6 +118,12 @@ def cmdlet(nome, *alias, group=None, usage=None):
 
 
 def out(testo="", colore=None, fine="\n"):
+    if not JV_RUN.is_set() and not CONTESTO.get("watchcmd") and threading.current_thread() is threading.main_thread():
+        t0 = time.time()                 # "someone is watching": every action stops here until the warning is closed
+        while not JV_RUN.wait(0.2):
+            if time.time() - t0 > JV_HOLD_MAX + 30:
+                JV_RUN.set()             # failsafe: never hold forever, whatever went wrong with the watcher
+                break
     sys.stdout.write((colore or TEXT) + str(testo) + TEXT + fine)
     sys.stdout.flush()
 

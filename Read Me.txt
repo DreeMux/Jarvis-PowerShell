@@ -1,4 +1,4 @@
-JARVIS POWERSHELL  -  modular version 3.0.0 (the program is v2.5.4)
+JARVIS POWERSHELL  -  modular version 3.1.0 (v2.5.4 + Screen Watch)
 Author: DreeMux
 License: GNU GPL v3 or later (see LICENSE and NOTICE)
 
@@ -8,13 +8,14 @@ ask (updating itself, starting a game or a program, saving a report).
 HOW TO OPEN:   double-click START.bat     (Python 3 must be installed)
 
 WHAT'S NEW IN THIS VERSION
-  - The single-file v2.5.4 program, split into 21 modules (src\) with a one-click START.bat.
-  - Same behaviour as v2.5.4.
+  - Screen Watch: the "watch" command (Windows only).
+  - Always-on guard: "watch guard on".
+  - 22 modules (new: src\20_screen_watch.py).
 
 WHAT IS IN THE FOLDER:
   START.bat    one-click start: aligns the modules and opens Jarvis
   pwsh.py      the file that really runs (and that Jarvis checks and updates by itself). You do not need to touch it.
-  src\         the code, split into 21 modules: this is where you work
+  src\         the code, split into 22 modules: this is where you work
   build.py     the "glue" between src\ and pwsh.py (START.bat runs it for you)
 
 HOW TO CHANGE THE CODE:
@@ -37,5 +38,15 @@ IF WINDOWS SAYS "UNKNOWN PUBLISHER" (SmartScreen):
 NOTES:
   - The folders jarvis_update\, jarvis_exports\ and ext\ live next to pwsh.py.
     If you had them with an older version, copy them into this folder.
-  - Behaviour is IDENTICAL to v2.5.4: same bytes, apart from 20 comment lines
-    "# >>>>> JARVIS-PART ... >>>>>" that are only used to put the modules back together.
+  - Apart from Screen Watch, behaviour is that of v2.5.4. The 20 comment lines
+    "# >>>>> JARVIS-PART ... >>>>>" are only used to put the modules back together.
+
+SCREEN WATCH (Windows only):  "watch" tells you when someone may be looking at your screen
+  (RDP, VNC, TeamViewer, Zoom and similar). It only READS what Windows reports (sessions, connections, processes,
+  window titles). Type:  help watch      Its only file is its settings file, jarvis_update\screenwatch.json
+
+ALWAYS-ON GUARD (works even when Jarvis is closed):  type  "watch guard on"  (once).
+  It puts a file in your Windows Startup folder that runs the same check in the background, with no window.
+  If Jarvis is open, Jarvis gives the warning (and pauses) and the guard stays silent: never two windows.
+  Manage it:  watch guard | on | off (removes everything) | start | stop
+  The file:  %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\JarvisScreenWatch.vbs
