@@ -5744,6 +5744,9 @@ def jv_upd_selftest():
                 for s in bad:
                     if s in plain and problem is None:
                         problem = f"output contains '{s}'"
+        if problem and problem.startswith("output "):
+            seen = " / ".join(l.strip() for l in plain.splitlines() if l.strip())      # what it really answered
+            problem += f"  [it said: {safe(seen)[:200] or '(nothing)'}]  [folder: {safe(os.getcwd())}]"
         tag["n"] += 1
         results.append((label, problem))
         out(f"  {'[ OK ]' if problem is None else '[FAIL]'} {label}" + (f"  -> {problem}" if problem else ""),
