@@ -19,21 +19,11 @@
 Run:  python pwsh.py      (Windows: double-click START.bat)
 Type  help  or just talk to it:  "find my games", "scan this PC for corrupt files".
 
-All the file tools are READ-ONLY: they never write, move, execute or delete your files.
-The ONLY thing JARVIS ever writes is its own program (pwsh.py) plus the folders
-updates/ and backups/ next to it, and only through the self-update system:
-    maintenance            health check + validation of pending updates (changes nothing)
-    maintenance -Prepare   make updates/pwsh_next.py (a copy with the version bumped)
-    implement jarvis       validate the newest update in updates/ and install it
-    improve <request>      JARVIS writes new code for himself with a FREE local model (Ollama): no key,
-                           no cost, nothing leaves this PC. It is saved in updates/ and is NEVER installed
-                           without 'implement jarvis'
-    implement jarvis -DryRun | -Rollback | <file>
+Everything here is READ-ONLY: nothing is ever written, moved, executed or deleted.
 Optional: pip install psutil  (live memory/CPU of a running game in pluton.key).
 Optional extensions: put .py files in a folder named ext/ next to this file.
 """
 
-import ast
 import codecs
 import difflib
 import errno
@@ -46,14 +36,12 @@ import pathlib
 import random
 import re
 import runpy
-import shlex
 import shutil
 import sqlite3
 import stat
 import struct
 import subprocess
 import sys
-import tempfile
 import time
 import zipfile
 import zlib
@@ -1601,12 +1589,1748 @@ def jarvis_status(intro="Systems nominal, sir"):
 
 def jarvis_greeting():
     jarvis_say(f"JARVIS online. {part_of_day()}, sir.")
-    jarvis_say(f"Hunter, game locator, file inspector and resource monitor are standing by (v{__version__}). "
-               "Your files are only ever read. I write nothing but my own updates, on 'implement jarvis'.")
+    jarvis_say("Hunter, game locator, file inspector and resource monitor are standing by. "
+               "Everything I do is read-only.")
     jarvis_status("Current status")
     jarvis_say('Type "help" for commands, or just tell me what you need: '
                '"find my games", "scan this PC for corrupt files".')
     out()
+
+
+# ---------- JARVIS deep layer: specific questions + opening files (everything READ-ONLY) ----------
+JV_PRON = {"it", "this", "that", "this file", "that file", "the file", "file", "selected", "selected file",
+           "the selected file", "the same", "same file", "it again", "questo", "questo file", "quel file",
+           "quello", "il file", "esso", "lo", "quel", "selezionato", "il file selezionato"}
+JV_HERE = {"folder", "this folder", "the folder", "directory", "this directory", "here", "cartella",
+           "questa cartella", "qui", "current folder", "cartella corrente"}
+JV_ORD = {"first": 1, "1st": 1, "primo": 1, "prima": 1, "second": 2, "2nd": 2, "secondo": 2, "seconda": 2,
+          "third": 3, "3rd": 3, "terzo": 3, "terza": 3, "fourth": 4, "4th": 4, "quarto": 4, "quarta": 4,
+          "fifth": 5, "5th": 5, "quinto": 5, "quinta": 5, "last": -1, "ultimo": -1, "ultima": -1}
+JV_EXTWORDS = ("png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf", "txt", "csv", "json", "zip", "rar", "7z", "exe",
+               "dll", "mp3", "mp4", "mkv", "avi", "mov", "wav", "docx", "xlsx", "pptx", "html", "xml", "sqlite",
+               "msi", "bat")
+JV_CATS = [
+    (("image", "images", "picture", "pictures", "photo", "photos", "immagine", "immagini", "foto"),
+     ("png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg")),
+    (("document", "documents", "documento", "documenti"), ("doc", "docx", "odt", "rtf", "pdf", "txt", "md")),
+    (("spreadsheet", "spreadsheets", "fogli di calcolo", "foglio di calcolo"), ("xls", "xlsx", "ods", "csv", "tsv")),
+    (("presentation", "presentations", "slides", "presentazioni"), ("ppt", "pptx", "odp")),
+    (("video", "videos"), ("mp4", "mkv", "avi", "mov", "wmv", "webm", "flv")),
+    (("music", "audio", "song", "songs", "musica", "canzoni"), ("mp3", "wav", "flac", "ogg", "m4a", "aac", "wma")),
+    (("archive", "archives", "archivio", "archivi"), ("zip", "rar", "7z", "gz", "tar", "tgz", "bz2", "xz")),
+    (("database", "databases"), ("db", "sqlite", "sqlite3")),
+    (("program", "programs", "executable", "executables", "eseguibili", "programmi"), ("exe", "msi", "bat", "cmd")),
+    (("script", "scripts", "source code", "codice"), ("py", "js", "ts", "c", "cpp", "h", "java", "cs", "sh", "ps1",
+                                                      "go", "rs", "lua")),
+]
+GM_COUNTS = [
+    (r"sprites?", "SPRT", "sprites"), (r"sounds?|sfx|sound effects?|suoni|effetti sonori", "SOND", "sounds"),
+    (r"rooms?|levels?|maps?|stanz\w+|livell\w+", "ROOM", "rooms"), (r"objects?|oggett\w+", "OBJT", "objects"),
+    (r"fonts?", "FONT", "fonts"), (r"paths?", "PATH", "paths"), (r"scripts?", "SCPT", "scripts"),
+    (r"shaders?", "SHDR", "shaders"), (r"backgrounds?|tile ?sets?", "BGND", "backgrounds / tile sets"),
+    (r"textures?|texture pages?", "TXTR", "texture pages"), (r"audio files?|embedded audio", "AUDO", "embedded audio files"),
+    (r"frames?", "TPAG", "texture-page items (sprite frames and images)"),
+    (r"strings?|dialog\w*|text lines?|testi|dialoghi", "STRG", "strings (text, names, dialogue...)"),
+    (r"code entries|compiled code|codice", "CODE", "code entries"),
+]
+PE_MACHINES = {0x14C: "32-bit (x86)", 0x8664: "64-bit (x64)", 0xAA64: "64-bit (ARM64)", 0x1C0: "32-bit (ARM)",
+               0x1C4: "32-bit (ARM Thumb-2)", 0x200: "64-bit (Itanium)"}
+INTEGRITY_TEST = {".zip": "every entry's CRC", ".png": "every chunk's CRC", ".jpg": "the start and end markers",
+                  ".jpeg": "the start and end markers", ".gif": "the header and trailer", ".pdf": "the header and the end marker",
+                  ".json": "a full parse", ".gz": "a full decompression", ".db": "SQLite's integrity check",
+                  ".sqlite": "SQLite's integrity check", ".sqlite3": "SQLite's integrity check"}
+
+
+def jv_ago(ts):
+    d = max(0, time.time() - ts)
+    for sec, nm in ((31536000, "year"), (2592000, "month"), (86400, "day"), (3600, "hour"), (60, "minute")):
+        if d >= sec:
+            n = int(d // sec)
+            return f"{n} {nm}{'s' if n != 1 else ''} ago"
+    return "just now"
+
+
+def jv_rel(p, base):
+    try:
+        return safe(os.path.relpath(p, base))
+    except ValueError:
+        return safe(p)
+
+
+def jv_fmt(x):
+    return f"{x:,.2f}".rstrip("0").rstrip(".") if isinstance(x, float) else f"{x:,}"
+
+
+def jv_listing(folder="."):
+    """The visible entries of a folder in the same order as Get-ChildItem (folders first)."""
+    try:
+        voci = [(n, os.path.join(folder, n)) for n in os.listdir(folder)]
+    except OSError:
+        return []
+    voci = [(n, p) for n, p in voci if not nascosto(p, n)]
+    dirs = sorted([v for v in voci if os.path.isdir(v[1])], key=lambda v: v[0].lower())
+    files = sorted([v for v in voci if not os.path.isdir(v[1])], key=lambda v: v[0].lower())
+    return [os.path.abspath(p) for _, p in dirs + files]
+
+
+def jv_games(depth=6):
+    """The data.win files of the known game folders, in the same order undersopic.key lists them."""
+    seen, res = set(), []
+    for p in find_named(game_locations(), GM_FILE, depth):
+        key = os.path.normcase(os.path.realpath(p))
+        if key not in seen:
+            seen.add(key)
+            res.append(p)
+    return res
+
+
+def jv_color_prompt(color, text):
+    return f"\x01{color}\x02{text}\x01{TEXT}\x02" if HAS_READLINE else color + text + TEXT
+
+
+# ---------------- finding the file / folder a sentence is about ----------------
+def jv_resolve(cand, strict=False, games=False):
+    """Turn a phrase ('data.win', 'the second one', 'undertale', 'biggest file') into a path.
+    Returns (status, payload): ok/path, many/[paths], range/count, pron/None, none/None."""
+    c0 = re.sub(r"[\s.,;:!?]+$", "", cand.strip().strip("\"'`“”‘’").strip())
+    low0 = c0.lower()
+    if low0 in JV_PRON:
+        return "pron", None
+    if low0 in JV_HERE:
+        return "ok", os.getcwd()
+    if c0:
+        for v in (c0, os.path.expanduser(c0)):
+            if os.path.exists(v):
+                return "ok", os.path.abspath(v)
+    c = re.sub(r"^(?:the|il|lo|la|l'|my|that|this|quel|quello|quella)\s+", "", c0, flags=re.I)
+    c = re.sub(r"^(?:file|folder|directory|cartella|document|documento|game|gioco)\s+", "", c, flags=re.I)
+    c = re.sub(r"^(?:called|named|chiamato|chiamata)\s+", "", c, flags=re.I)
+    c = c.strip().strip("\"'`").strip()
+    low = c.lower()
+    if not low or low in JV_PRON:
+        return "pron", None
+    if low in JV_HERE:
+        return "ok", os.getcwd()
+    if os.path.exists(c):
+        return "ok", os.path.abspath(c)
+    games_word = bool(re.search(r"\b(?:game|games|gioco|giochi)\b", low0))
+
+    idx = None
+    m = re.fullmatch(r"(?:#|n\.?\s*|no\.?\s*|number\s+|numero\s+)?(\d{1,4})(?:st|nd|rd|th)?"
+                     r"(?:\s+(?:one|file|game|result|item|gioco|risultato))?", low)
+    if m:
+        idx = int(m.group(1))
+    else:
+        m = re.fullmatch(r"(first|second|third|fourth|fifth|last|primo|prima|secondo|seconda|terzo|terza|quarto|"
+                         r"quarta|quinto|quinta|ultimo|ultima|1st|2nd|3rd|4th|5th)"
+                         r"(?:\s+(?:one|file|game|result|item|gioco|risultato|folder|cartella))?", low)
+        if m:
+            idx = JV_ORD[m.group(1)]
+    if idx is not None:
+        pool = jv_games() if games_word else (CONTESTO.get("jlist") or jv_listing())
+        pool = [p for p in pool if os.path.exists(p)]
+        if not pool:
+            return "none", None
+        if idx == -1:
+            return "ok", pool[-1]
+        return ("ok", pool[idx - 1]) if 1 <= idx <= len(pool) else ("range", len(pool))
+
+    m = re.fullmatch(r"(?:the\s+)?(biggest|largest|heaviest|smallest|lightest|newest|latest|most recent|oldest|"
+                     r"più grande|piu grande|più pesante|piu pesante|più piccolo|piu piccolo|più recente|piu recente|"
+                     r"più vecchio|piu vecchio)(?:\s+(?:file|one|here|in (?:this )?folder|qui))*", low)
+    if m:
+        files = [p for p in jv_listing() if os.path.isfile(p)]
+        if not files:
+            return "none", None
+        w = m.group(1)
+        try:
+            if w in ("biggest", "largest", "heaviest", "più grande", "piu grande", "più pesante", "piu pesante"):
+                return "ok", max(files, key=os.path.getsize)
+            if w in ("smallest", "lightest", "più piccolo", "piu piccolo"):
+                return "ok", min(files, key=os.path.getsize)
+            if w in ("oldest", "più vecchio", "piu vecchio"):
+                return "ok", min(files, key=os.path.getmtime)
+            return "ok", max(files, key=os.path.getmtime)
+        except OSError:
+            return "none", None
+
+    try:
+        names = os.listdir(".")
+    except OSError:
+        names = []
+    exact = [n for n in names if n.lower() == low]
+    if exact:
+        return "ok", os.path.abspath(exact[0])
+    stem = [n for n in names if os.path.splitext(n)[0].lower() == low]
+    if len(stem) == 1:
+        return "ok", os.path.abspath(stem[0])
+    if len(stem) > 1:
+        return "many", [os.path.abspath(n) for n in sorted(stem, key=str.lower)]
+    if not strict and len(low) >= 2:
+        part = [n for n in names if low in n.lower()]
+        pool = [n for n in part if n.lower().startswith(low)] or part
+        if len(pool) == 1:
+            return "ok", os.path.abspath(pool[0])
+        if 1 < len(pool) <= 12:
+            return "many", [os.path.abspath(n) for n in sorted(pool, key=str.lower)]
+        close = difflib.get_close_matches(low, [n.lower() for n in names], n=1, cutoff=0.72)
+        if close:
+            return "ok", os.path.abspath(next(n for n in names if n.lower() == close[0]))
+    seen = 0                                           # a little deeper: exact names in sub-folders
+    for cur, ds, fs in os.walk(".", onerror=lambda e: None):
+        depth = 0 if cur == "." else os.path.relpath(cur).count(os.sep) + 1
+        ds[:] = [] if depth >= 3 else sorted(d for d in ds if not skip_dir(os.path.join(cur, d)))
+        for n in ds + fs:
+            seen += 1
+            if n.lower() == low or os.path.splitext(n)[0].lower() == low:
+                return "ok", os.path.abspath(os.path.join(cur, n))
+        if seen > 20000:
+            break
+    if games and len(low) >= 3:
+        hits = []
+        for p in jv_games():
+            try:
+                nm = (gm_read_info(p)["name"] or "").lower()
+            except OSError:
+                nm = ""
+            folder = os.path.basename(os.path.dirname(os.path.abspath(p))).lower()
+            if low in folder or (nm and low in nm):
+                hits.append(p)
+        if len(hits) == 1:
+            return "ok", hits[0]
+        if hits:
+            return "many", hits[:12]
+    return "none", None
+
+
+def jv_find_target(orig, t):
+    """(path, True) when the sentence names an existing file/folder; (None, False) otherwise."""
+    for m in re.finditer(r'"([^"]+)"|`([^`]+)`|“([^”]+)”|(?<!\w)\'([^\']+)\'(?!\w)', orig):
+        s = next(g for g in m.groups() if g)
+        v = os.path.expanduser(s)
+        if os.path.exists(v):
+            return os.path.abspath(v), True
+    skip = {"file", "files", "folder", "folders", "here", "this", "that", "it", "the", "all", "game", "games",
+            "data", "size", "type", "lines", "words", "text", "in", "of", "to", "on", "is", "and", "me", "my"}
+    for tok in orig.split():
+        s = tok.strip(".,;:!?()[]{}\"'`")
+        if len(s) >= 2 and s.lower() not in skip and s not in (".", "..") and os.path.exists(os.path.expanduser(s)):
+            return os.path.abspath(os.path.expanduser(s)), True
+    try:
+        names = sorted(os.listdir("."), key=len, reverse=True)
+    except OSError:
+        names = []
+    for n in names:
+        nl = n.lower()
+        if len(nl) >= 3 and (" " in nl or "." in nl) and re.search(r"(?<![\w.-])" + re.escape(nl) + r"(?![\w-])", t):
+            return os.path.abspath(n), True
+    for tok in jv_filename_tokens(orig):                    # a name that lives a few folders down
+        st, pay = jv_resolve(tok, strict=True)
+        if st == "ok":
+            return pay, True
+    return None, False
+
+
+def jv_filename_tokens(orig):
+    """Words that look like file names (name.ext with a known extension)."""
+    known = {e.lstrip(".") for e in TEXT_EXT} | {e.lstrip(".") for e in OFFICE} | set(JV_EXTWORDS) | \
+        {"win", "db", "sqlite3", "gz", "dat", "bin", "iso", "tar", "7z", "ini", "log", "dll", "sys"}
+    res = []
+    for tok in orig.split():
+        s = tok.strip(".,;:!?()[]{}\"'`")
+        m = re.fullmatch(r"[\w\-.]*\w\.([A-Za-z0-9]{1,6})", s)
+        if m and m.group(1).lower() in known:
+            res.append(s)
+    return res
+
+
+def jv_target(orig, t, sel):
+    p, explicit = jv_find_target(orig, t)
+    if p:
+        CONTESTO["jlast"] = {"path": p, "sel": sel}
+        return p, True
+    last = CONTESTO.get("jlast")
+    if last and os.path.exists(last["path"]) and (sel is None or last["sel"] == sel):
+        return last["path"], False
+    if sel and os.path.exists(sel):
+        return sel, False
+    return None, False
+
+
+def jv_hint(kind):
+    if kind == "GameMaker data file":
+        ex = '"what game is this", "how many sprites", "list the chunks", "search for <text>"'
+    elif kind.startswith("Text file"):
+        ex = '"how many lines", "first 20 lines", "search for <word>", "columns" (for csv), "which keys" (for json)'
+    elif is_zip(kind):
+        ex = '"what is inside", "biggest entry", "does it contain <name>"'
+    elif kind == "SQLite database":
+        ex = '"which tables", "how many rows in <table>", "columns of <table>"'
+    elif kind.endswith("image"):
+        ex = '"dimensions", "is it corrupt", "sha256"'
+    elif kind == "Windows executable":
+        ex = '"is it 64-bit", "when was it built", "is it signed"'
+    elif kind == "PDF document":
+        ex = '"how many pages", "is it corrupt", "sha256"'
+    else:
+        ex = '"how big is it", "when was it modified", "is it corrupt", "sha256", "show me the hex"'
+    jarvis_say("It's selected, sir. You can ask me, for instance: " + ex + ".")
+
+
+# ---------------- opening / selecting / reading ----------------
+def jv_open_view(path, select_only=False):
+    full = os.path.abspath(path)
+    if os.path.isdir(full):
+        try:
+            os.chdir(full)
+        except OSError as e:
+            jarvis_say(f"I can't enter '{safe(full)}', sir ({e.strerror}).")
+            return
+        CONTESTO["file"] = None
+        ack(f"Entering {safe(os.path.basename(full) or full)}.")
+        esegui("Get-ChildItem")
+        CONTESTO["jlist"] = jv_listing()
+        return
+    try:
+        os.chdir(os.path.dirname(full))
+    except OSError:
+        pass
+    CONTESTO["file"] = full
+    CONTESTO["jlast"] = {"path": full, "sel": full}
+    kind, name = detect_kind(full), safe(os.path.basename(full))
+    if select_only:
+        try:
+            jarvis_say(f"Selected {name} ({kind}, {human(os.path.getsize(full))}).")
+        except OSError:
+            jarvis_say(f"Selected {name}.")
+    else:
+        ack(f"Opening {name}. Read-only: I only look inside, I never run or change it.")
+        interact_port([full])
+    jv_hint(kind)
+
+
+def jv_read_paged(path):
+    text, enc = read_text(path)
+    lines = text.splitlines()
+    part = os.path.getsize(path) > MAX_TEXT
+    jarvis_say(f"{safe(os.path.basename(path))}: {len(lines):,} line(s), {enc}"
+               f"{', showing the first 5 MB only' if part else ''}.")
+    width = max(40, shutil.get_terminal_size((100, 30)).columns - 9)
+    page = max(10, shutil.get_terminal_size((100, 30)).lines - 3)
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    shown = 0
+    for i, line in enumerate(lines, 1):
+        out(f"{i:>6} | {safe(line)[:width]}")
+        shown += 1
+        if not interactive and shown >= 300:
+            out(f"  ... {len(lines) - i:,} more line(s)", GRAY)
+            break
+        if interactive and shown % page == 0 and i < len(lines):
+            try:
+                ans = input(jv_color_prompt(GRAY, "-- Enter = next page, q = stop -- "))
+            except (EOFError, KeyboardInterrupt):
+                out()
+                break
+            if ans.strip().lower() in ("q", "quit", "stop", "exit", "n", "no"):
+                break
+    out()
+
+
+def jv_open_request(orig, t, sel):
+    pre = r"^(?:(?:please|pls|per favore|per piacere)[,\s]+)?(?:(?:can|could|would|will) you(?: please)?\s+|" \
+          r"(?:puoi|potresti|mi puoi|mi potresti)\s+)?"
+    m = re.match(pre + r"(open|apri(?:mi)?|view|read|leggi(?:mi)?|display|show me|show|mostrami|mostra|guarda|"
+                       r"look at|check out|select|choose|pick|use|seleziona|scegli)\s+(.+)$", orig, re.I)
+    if not m:
+        return False
+    verb, rest = m.group(1).lower(), m.group(2).strip()
+    if verb in ("select", "choose", "pick", "use", "seleziona", "scegli"):
+        mode = "select"
+    elif verb in ("read", "leggi", "leggimi"):
+        mode = "read"
+    elif verb in ("open", "apri", "aprimi"):
+        mode = "open"
+    else:
+        mode = "show"
+    strict = mode in ("read", "show")
+    st, pay = jv_resolve(rest, strict=strict, games=not strict)
+    tail = None
+    if st in ("none", "range"):
+        for sm in re.finditer(r"(?:\s*,\s*|\s+(?:and then|and|then|e poi|poi|e)\s+)", rest, re.I):
+            st2, pay2 = jv_resolve(rest[:sm.start()], strict=strict, games=not strict)
+            if st2 in ("ok", "many", "pron"):
+                st, pay, tail = st2, pay2, rest[sm.end():].strip()
+                break
+    if st == "pron":
+        last = CONTESTO.get("jlast")
+        path = sel if (sel and os.path.exists(sel)) else (last["path"] if last and os.path.exists(last["path"]) else None)
+        if path is None:
+            if strict:
+                return False
+            jarvis_say("No file is selected yet, sir. Tell me which one: 'open <file>'.")
+            show_file_choices()
+            return True
+        st, pay = "ok", path
+    if st == "many":
+        if strict:
+            return False
+        jarvis_say("Several things match, sir. Which one?")
+        for i, p in enumerate(pay, 1):
+            out(f"  [{i}] {safe(os.path.relpath(p) if not os.path.isabs(os.path.relpath(p)) else p)}", CYAN)
+        CONTESTO["jlist"] = pay
+        jarvis_say("Say 'open 1', 'open 2'... or give me the exact name.")
+        return True
+    if st == "range":
+        if strict:
+            return False
+        jarvis_say(f"There are only {pay} item(s) in that list, sir.")
+        return True
+    if st == "none":
+        if strict:
+            return False
+        cand = re.sub(r"\s+", " ", rest)
+        jarvis_say(f"I can't find '{safe(cand)}', sir. I looked in this folder, three levels of sub-folders and your game folders.")
+        close = difflib.get_close_matches(cand.lower(), [n.lower() for n in os.listdir(".")], n=3, cutoff=0.5)
+        if close:
+            jarvis_say("Did you mean: " + ", ".join(safe(n) for n in close) + "?")
+        else:
+            jarvis_say("Say 'list' to see what is here.")
+        return True
+    if mode == "select":
+        jv_open_view(pay, select_only=True)
+    elif mode == "read" and os.path.isfile(pay) and detect_kind(pay).startswith("Text file"):
+        CONTESTO["file"] = os.path.abspath(pay)
+        CONTESTO["jlast"] = {"path": CONTESTO["file"], "sel": CONTESTO["file"]}
+        try:
+            os.chdir(os.path.dirname(CONTESTO["file"]))
+        except OSError:
+            pass
+        ack("Reading it, read-only.")
+        jv_read_paged(pay)
+    else:
+        jv_open_view(pay)
+    if tail:
+        jarvis_interpret(tail)
+    return True
+
+
+def jv_selection(orig, t, sel):
+    if re.search(r"\b(?:deselect|unselect|clear (?:the |my )?selection|forget (?:the |this |that )?file|deseleziona|"
+                 r"annulla (?:la )?selezione|rimuovi (?:la )?selezione|drop (?:the )?file)\b", t):
+        if sel:
+            CONTESTO["file"] = None
+            CONTESTO.pop("jlast", None)
+            jarvis_say(f"Selection cleared, sir. {safe(os.path.basename(sel))} is no longer selected.")
+        else:
+            jarvis_say("Nothing is selected, sir.")
+        return True
+    if re.search(r"^(?:what|which|quale|cosa|che)\b.*\b(?:selected|selezionat\w*|chosen|scelto|am i using|are we using|"
+                 r"working (?:on|with)|current file|file corrente)\b", t):
+        if sel and os.path.exists(sel):
+            try:
+                jarvis_say(f"{safe(os.path.basename(sel))}, sir: {detect_kind(sel)}, {human(os.path.getsize(sel))}.")
+            except OSError:
+                jarvis_say(f"{safe(os.path.basename(sel))}, sir.")
+            out(f"  {safe(sel)}", GRAY)
+        else:
+            jarvis_say("No file is selected, sir. Say 'open <file>' or 'select <file>'.")
+        return True
+    return False
+
+
+def jv_navigate(orig, t):
+    m = re.match(r"^(?:please\s+|per favore\s+)?(?:go|move|navigate|vai|andiamo|torna|tornare)\b\s*(.*)$", t)
+    if not m and not re.fullmatch(r"(?:up|back|indietro)", t):
+        return False
+    rest = m.group(1).strip() if m else t
+    home = os.path.expanduser("~")
+    if re.fullmatch(r"(?:up|back|up one(?: level| folder)?|back one(?: level| folder)?|up a (?:level|folder)|"
+                    r"to the parent(?: folder)?|indietro|su|su di (?:una|1) cartella|alla cartella superiore|"
+                    r"back to the parent(?: folder)?|(?:up|back)(?: a| one)? level)", rest):
+        dest = ".."
+    elif re.fullmatch(r"(?:(?:to |in |a |alla |nella )?(?:the )?(?:home|casa)(?: folder| directory| cartella)?)", rest):
+        dest = home
+    else:
+        rest = re.sub(r"^(?:to|into|in|a|alla|nella|nel|al)\s+(?:the\s+|la\s+|il\s+)?(?:folder\s+|cartella\s+)?", "", rest).strip()
+        if not rest:
+            return False
+        aliases = {"downloads": "Downloads", "download": "Downloads", "desktop": "Desktop", "scrivania": "Desktop",
+                   "documents": "Documents", "documenti": "Documents", "pictures": "Pictures", "immagini": "Pictures",
+                   "music": "Music", "musica": "Music", "videos": "Videos", "video": "Videos"}
+        dest = None
+        if rest.lower() in aliases:
+            cand = os.path.join(home, aliases[rest.lower()])
+            dest = cand if os.path.isdir(cand) else None
+        if dest is None:
+            st, pay = jv_resolve(rest, strict=False)
+            if st == "ok" and os.path.isdir(pay):
+                dest = pay
+        if dest is None:
+            if rest.lower() in aliases or re.fullmatch(r"[\w .\-]{1,60}", rest):
+                jarvis_say(f"I can't find a folder called '{safe(rest)}', sir.")
+                return True
+            return False
+    try:
+        os.chdir(dest)
+        CONTESTO["file"] = None
+        CONTESTO["jlist"] = jv_listing()
+        jarvis_say(f"Now in {safe(os.getcwd())}.")
+    except OSError as e:
+        jarvis_say(f"I can't go there, sir ({e.strerror}).")
+    return True
+
+
+def jv_uptime():
+    try:
+        import psutil
+        return time.time() - psutil.boot_time()
+    except Exception:
+        pass
+    try:
+        if os.name == "nt":
+            import ctypes
+            return ctypes.windll.kernel32.GetTickCount64() / 1000.0
+        with open("/proc/uptime") as f:
+            return float(f.read().split()[0])
+    except Exception:
+        return None
+
+
+def jv_global(t):
+    now = datetime.now()
+    if re.search(r"\bwhat time\b|\bcurrent time\b|\btime is it\b|\bche ore\b|\bche ora\b|\bwhat'?s the time\b", t):
+        jarvis_say(f"It is {now.strftime('%H:%M')}, sir.")
+        return True
+    if re.search(r"today'?s date|\bwhat(?:'s| is) (?:the )?(?:date|day)\b|\bwhat day\b|\bche giorno\b|\bche data\b|"
+                 r"\bcurrent date\b|\bdata di oggi\b", t):
+        jarvis_say(f"Today is {now.strftime('%A, %d %B %Y')}, sir.")
+        return True
+    folderish = re.search(r"folder|director|cartella|\bfiles?\b|\bfile\b", t)
+    if not folderish and (re.search(r"\b(?:free|left|available|remaining|libero|liber[ae]|disponibile|rimast\w+)\b.*"
+                                    r"\b(?:space|disk|storage|drive|spazio|disco)\b", t)
+                          or re.search(r"\b(?:disk|drive|storage|disco)\s+(?:space|usage|capacity)\b|\bspazio\b.*\b(?:libero|disco)\b|"
+                                       r"\bhow much (?:disk |storage )?space\b", t)):
+        try:
+            tot, used, free = shutil.disk_usage(os.getcwd())
+            jarvis_say(f"The drive of this folder has {human(free)} free of {human(tot)} ({used * 100 // tot}% used), sir.")
+        except OSError as e:
+            jarvis_say(f"I can't read the disk figures, sir ({e.strerror}).")
+        return True
+    if re.search(r"\bpython version\b|\bwhich python\b|\bversione di python\b", t):
+        jarvis_say(f"Python {sys.version.split()[0]} on {sys.platform}, sir.")
+        return True
+    if re.search(r"\bwhat os\b|\bwhich os\b|operating system|sistema operativo|windows version|versione di windows", t):
+        import platform
+        jarvis_say(f"{platform.platform()}, sir.")
+        return True
+    if re.search(r"how many (?:cpu|cores?|processors?)|\bcpu cores?\b|quanti (?:core|processori)|number of cores", t):
+        jarvis_say(f"{os.cpu_count()} logical processor(s), sir.")
+        return True
+    if re.search(r"\buptime\b|how long (?:has|have) (?:this|the) (?:pc|computer) been (?:on|running)|\bacceso da\b", t):
+        up = jv_uptime()
+        if up is None:
+            jarvis_say("I can't read the uptime on this system, sir.")
+        else:
+            d, rem = divmod(int(up), 86400)
+            jarvis_say(f"Up for {d} day(s), {rem // 3600} hour(s) and {rem % 3600 // 60} minute(s), sir.")
+        return True
+    if re.search(r"\bwho am i\b|\bmy user ?name\b|\bhostname\b|\bcomputer name\b|\bnome (?:utente|del computer)\b", t):
+        import getpass
+        import socket
+        try:
+            who = getpass.getuser()
+        except Exception:
+            who = "unknown"
+        jarvis_say(f"You are {safe(who)} on {safe(socket.gethostname())}, sir.")
+        return True
+    return False
+
+
+def jv_examples(t):
+    if not re.search(r"\bexamples?\b|\besempi\b|what can i ask|cosa posso chiedere|what (?:else )?can you answer|"
+                     r"what do you know|capabilit", t):
+        return False
+    jarvis_say("Here is what I can answer, sir. All read-only:")
+    rows = [
+        ("OPEN", 'open data.win   |   open the 2nd one   |   open undertale   |   read notes.txt   |   go up'),
+        ("ANY FILE", 'how big is it   |   when was it modified   |   what type is it   |   is it corrupt   |   sha256   |   does the md5 match <hash>'),
+        ("TEXT", 'how many lines/words   |   first 20 lines   |   last 5 lines   |   lines 10 to 20   |   search for "word"   |   hex dump'),
+        ("CSV / JSON", 'which columns   |   average of <column>   |   first 5 rows   |   which keys   |   value of <key>'),
+        ("ZIP / DB", 'what is inside   |   biggest entry   |   which tables   |   how many rows in <table>   |   columns of <table>'),
+        ("IMAGE / PDF / EXE", 'dimensions   |   how many pages   |   is it 64-bit   |   when was it built   |   is it signed'),
+        ("GAMES (data.win)", 'what game is this   |   how many sprites/rooms/sounds   |   list the chunks   |   biggest chunk   |   search for "text"'),
+        ("FOLDER", 'how many files here   |   biggest files   |   newest / oldest   |   find all png files   |   duplicates   |   bigger than 100 MB   |   modified today   |   by extension'),
+        ("PC", 'free disk space   |   what time is it   |   uptime   |   status   |   find my games   |   scan this PC for corrupt files'),
+    ]
+    w = max(len(a) for a, _ in rows)
+    for a, b in rows:
+        out(f"  {a.ljust(w)}  {b}", CYAN)
+    out()
+    return True
+
+
+# ---------------- extra readers (all read-only) ----------------
+def jv_gm_chunks(path):
+    """[(chunk id, data start, data length)] of a GameMaker data file."""
+    res = []
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        head = f.read(8)
+        if len(head) < 8 or head[:4] != b"FORM":
+            return res
+        end = min(struct.unpack("<I", head[4:8])[0] + 8, size)
+        pos = 8
+        while pos + 8 <= end and len(res) < 256:
+            f.seek(pos)
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                break
+            cid, ln = hdr[:4], struct.unpack("<I", hdr[4:8])[0]
+            if not re.fullmatch(rb"[A-Z0-9]{4}", cid):
+                break
+            res.append((cid.decode(), pos + 8, ln))
+            pos += 8 + ln
+    return res
+
+
+def jv_gm_count(path, start, ln):
+    if ln < 4:
+        return None
+    with open(path, "rb") as f:
+        f.seek(start)
+        cnt = struct.unpack("<I", f.read(4))[0]
+    return cnt if cnt * 4 + 4 <= ln else None
+
+
+def jv_pe(path):
+    with open(path, "rb") as f:
+        mz = f.read(64)
+        if len(mz) < 64 or mz[:2] != b"MZ":
+            return None
+        f.seek(struct.unpack("<I", mz[60:64])[0])
+        if f.read(4) != b"PE\x00\x00":
+            return None
+        machine, _, ts, _, _, optsz, chars = struct.unpack("<HHIIIHH", f.read(20))
+        opt = f.read(optsz)
+    if len(opt) < 70:
+        return None
+    magic = struct.unpack("<H", opt[:2])[0]
+    sub = struct.unpack("<H", opt[68:70])[0]
+    dd = 96 if magic == 0x10B else 112
+    signed = dotnet = False
+    if len(opt) >= dd + 120:
+        signed = struct.unpack("<II", opt[dd + 32:dd + 40])[1] > 0
+        dotnet = struct.unpack("<II", opt[dd + 112:dd + 120])[1] > 0
+    return {"machine": PE_MACHINES.get(machine, f"unknown machine 0x{machine:04X}"), "ts": ts,
+            "dll": bool(chars & 0x2000), "subsystem": {2: "graphical (GUI)", 3: "console"}.get(sub, f"type {sub}"),
+            "signed": signed, "dotnet": dotnet}
+
+
+def jv_hex_rows(data, base=0):
+    rows = []
+    for i in range(0, len(data), 16):
+        chunk = data[i:i + 16]
+        hx = " ".join(f"{b:02X}" for b in chunk).ljust(47)
+        asc = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        rows.append(f"  {base + i:08X}  {hx}  {asc}")
+    return rows
+
+
+def jv_term(orig, t, path):
+    """The word/phrase the person wants searched for in a file."""
+    for m in re.finditer(r'"([^"]+)"|`([^`]+)`|“([^”]+)”|(?<!\w)\'([^\']+)\'(?!\w)', orig):
+        s = next(g for g in m.groups() if g)
+        if not os.path.exists(os.path.expanduser(s)):
+            return s
+    stop = {"the", "a", "an", "it", "this", "that", "file", "files", "in", "text", "something", "anything", "any",
+            "for", "inside", "whether", "if", "word", "string", "phrase", "is", "there", "il", "la", "lo", "un", "una"}
+    pats = [r"(?:the\s+)?(?:word|text|string|phrase|parola|frase|stringa)\s+(\S+)",
+            r"(?:search|find|look)\s+(?:for\s+)?(\S+)\s+(?:in|inside|within|on|dentro|nel|nello|nella|from)\b",
+            r"(?:cerca|trova)\s+(\S+)\s+(?:in|dentro|nel|nello|nella)\b",
+            r"(?:search(?:\s+for)?|look\s+for|grep|cerca(?:re)?|trova(?:re)?|find)\s+(?:the\s+(?:word|text|string|phrase)\s+|"
+            r"la\s+(?:parola|frase)\s+)?(\S+)$",
+            r"contains?\s+(?:the\s+)?(\S+)", r"contiene\s+(?:la parola\s+)?(\S+)",
+            r"mention(?:s|ing)?\s+(\S+)",
+            r"how many times (?:does |is |do )?(\S+)", r"quante volte (?:compare |appare |c'è )?(\S+)"]
+    base = os.path.basename(path).lower()
+    for p in pats:
+        m = re.search(p, orig, re.I)
+        if m:
+            s = m.group(1).strip(".,;:!?()[]{}\"'`")
+            if s and s.lower() not in stop and s.lower() != base:
+                return s
+    return None
+
+
+def jv_search(path, term, kind, name):
+    tl = term.lower()
+    if is_zip(kind):
+        try:
+            with zipfile.ZipFile(path) as z:
+                hits = [i for i in z.infolist() if tl in i.filename.lower()]
+        except zipfile.BadZipFile:
+            jarvis_say(f"{name} does not open as a ZIP archive, sir: it may be damaged.")
+            return
+        jarvis_say(f"{len(hits)} entr{'y' if len(hits) == 1 else 'ies'} in {name} match '{safe(term)}' (names only).")
+        for i in hits[:20]:
+            out(f"  {human(i.file_size).rjust(12)}  {safe(i.filename)}")
+        if len(hits) > 20:
+            out(f"  ... and {len(hits) - 20:,} more", GRAY)
+        out()
+        return
+    if kind.startswith("Text file"):
+        text, enc = read_text(path)
+        lines = text.splitlines()
+        found = [(i, ln) for i, ln in enumerate(lines, 1) if tl in ln.lower()]
+        total = text.lower().count(tl)
+        part = " (first 5 MB only)" if os.path.getsize(path) > MAX_TEXT else ""
+        if not found:
+            jarvis_say(f"'{safe(term)}' does not appear in {name}, sir{part}. The search ignores upper/lower case.")
+            return
+        jarvis_say(f"'{safe(term)}' appears {total:,} time(s) on {len(found):,} line(s) of {name}{part}.")
+        for i, ln in found[:15]:
+            out(f"  {i:>6} | {safe(ln.strip())[:110]}")
+        if len(found) > 15:
+            out(f"  ... and {len(found) - 15:,} more line(s)", GRAY)
+        out()
+        return
+    limit = 64 << 20
+    with open(path, "rb") as f:
+        data = f.read(limit)
+    hits = []
+    for enc_name in ("utf-8", "utf-16-le"):
+        try:
+            pat = term.encode(enc_name)
+        except UnicodeEncodeError:
+            continue
+        hits += [(m.start(), enc_name) for m in re.finditer(re.escape(pat), data, re.I)]
+    hits.sort()
+    part = " (first 64 MB only)" if os.path.getsize(path) > limit else ""
+    if not hits:
+        jarvis_say(f"I found no '{safe(term)}' inside {name}, sir{part}. Text is searched as UTF-8 and UTF-16, ignoring case.")
+        return
+    chunks = jv_gm_chunks(path) if kind == "GameMaker data file" else []
+    jarvis_say(f"'{safe(term)}' appears {len(hits):,} time(s) in {name}{part}. First {min(len(hits), 15)}:")
+    for off, enc_name in hits[:15]:
+        ctx = data[max(0, off - 24):off + 48]
+        ctx = "".join(chr(b) if 32 <= b < 127 else "." for b in ctx)
+        where = next((f" [{cid}]" for cid, s, ln in chunks if s <= off < s + ln), "")
+        out(f"  0x{off:08X}{where}  {enc_name}  ...{ctx}...")
+    out()
+
+
+def jv_corrupt_q(path, kind, name, ext):
+    if kind == "GameMaker data file" or os.path.basename(path).lower() == GM_FILE:
+        info = gm_read_info(path)
+        if info["notes"]:
+            jarvis_say(f"I see problems in {name}, sir:")
+            for n in info["notes"]:
+                out(f"  - {n}", YELLOW)
+        else:
+            jarvis_say(f"{name} looks intact, sir: the FORM length matches the file and all {len(info['chunks'])} chunks parse.")
+        return
+    status, reason = check_file(path)
+    if status == "CORRUPT":
+        jarvis_say(f"Yes, sir. {name} is damaged: {reason}.")
+    elif status == "WARNING":
+        jarvis_say(f"Possibly, sir. {name}: {reason}.")
+    elif status == "EMPTY":
+        jarvis_say(f"{name} is empty (0 bytes), sir. Nothing to be read from it.")
+    elif status == "SKIPPED":
+        jarvis_say(f"I did not deep-check {name}, sir: {reason.lower()}.")
+    elif ext in INTEGRITY_TEST or ext in ZIP_EXT:
+        test = INTEGRITY_TEST.get(ext, "every entry's CRC")
+        jarvis_say(f"No damage found, sir. {name} passes my check of {test}.")
+    elif ext in TEXT_EXT:
+        jarvis_say(f"No damage found, sir. {name} is readable text with no stray NUL bytes.")
+    else:
+        try:
+            with open(path, "rb") as f:
+                f.read(65536)
+            tail_of(path, 4096)
+            jarvis_say(f"I found no sign of damage in {name}, sir, but I have no integrity test for this file type: "
+                       "all I can say is that it reads fine from start to end markers.")
+        except OSError as e:
+            jarvis_say(f"I can't read {name} properly, sir ({e.strerror}). It may be damaged.")
+
+
+# ---------------- per-type question handlers (return True when they answered) ----------------
+def jv_gm_q(path, t, name):
+    h = lambda *pats: any(re.search(p, t) for p in pats)
+    chunks = jv_gm_chunks(path)
+    info = gm_read_info(path)
+    size = os.path.getsize(path)
+    asked = [(cid, label) for pat, cid, label in GM_COUNTS if re.search(r"\b(?:" + pat + r")\b", t)]
+    if asked:
+        table = {c[0]: c for c in chunks}
+        for cid, label in asked:
+            if cid not in table:
+                jarvis_say(f"{name} has no {cid} chunk, so it lists no {label}, sir.")
+                continue
+            cnt = jv_gm_count(path, table[cid][1], table[cid][2])
+            if cnt is None:
+                jarvis_say(f"The {cid} chunk of {name} has an unusual layout, sir: I can't count the {label} safely.")
+            else:
+                jarvis_say(f"{name} lists {cnt:,} {label} (read from the {cid} chunk header).")
+        return True
+    if h(r"\bchunks?\b", r"\bbiggest\b.*\b(?:part|section|thing|chunk)\b", r"\btakes? (?:the )?most (?:space|room)\b",
+         r"\bwhat takes\b", r"\bpiù pesant\w*\b", r"\bsections?\b"):
+        if not chunks:
+            jarvis_say(f"I can't read a chunk table from {name}, sir: it may be damaged.")
+            return True
+        big = h(r"biggest|largest|most|heaviest|takes|pesant|grand")
+        rows = sorted(chunks, key=lambda c: -c[2])[:8] if big else chunks
+        jarvis_say(f"{name} has {len(chunks)} chunk(s)" + (". The biggest:" if big else ":"))
+        for cid, s, ln in rows:
+            out(f"  {cid}  {human(ln).rjust(12)}  {ln * 100 / max(size, 1):5.1f}%  - {GM_LABELS.get(cid, '')}")
+        out()
+        return True
+    if h(r"\b(?:what|which|che|quale)\b.*\b(?:game|gioco)\b", r"\bgame name\b", r"\bname of (?:the|this) game\b",
+         r"\btitle\b", r"\bgame\b.*\bcalled\b", r"\bgamemaker\b|\bgame ?maker\b", r"\bengine\b", r"\bversion\b|\bversione\b",
+         r"\bbytecode\b", r"\bnome del gioco\b", r"\bgioco\b"):
+        game = info["name"] or "an unnamed game"
+        gm = f", made with GameMaker {info['gm']}" if info["gm"] else ""
+        bc = f", bytecode version {info['bytecode']}" if info["bytecode"] is not None else ""
+        jarvis_say(f"{name} belongs to {safe(game)}{gm}{bc}, sir. It has {len(chunks)} chunks and weighs {human(size)}.")
+        for n in info["notes"]:
+            out(f"  Warning: {n}", YELLOW)
+        return True
+    if h(r"\bstore\b", r"\bsteam\b", r"\bepic\b", r"\bgog\b", r"\bitch\b", r"\binstall\w*\b", r"\bnegozio\b"):
+        jarvis_say(f"{name} sits in: {safe(os.path.dirname(os.path.abspath(path)))}  (looks like: {store_of(path)}).")
+        return True
+    return False
+
+
+GM_LABELS = {"GEN8": "general info", "OPTN": "options", "LANG": "languages", "EXTN": "extensions", "SOND": "sounds",
+             "AGRP": "audio groups", "SPRT": "sprites", "BGND": "backgrounds / tile sets", "PATH": "paths",
+             "SCPT": "scripts", "GLOB": "global scripts", "SHDR": "shaders", "FONT": "fonts", "TMLN": "timelines",
+             "OBJT": "objects", "ROOM": "rooms", "DAFL": "data files", "TPAG": "texture-page items", "CODE": "code",
+             "VARI": "variables", "FUNC": "functions", "STRG": "strings", "TXTR": "textures", "AUDO": "audio",
+             "SEQN": "sequences", "ACRV": "animation curves", "TGIN": "texture group info", "DBGI": "debug info",
+             "EMBI": "embedded images", "FEDS": "feature flags", "FEAT": "feature flags", "PSEM": "particle systems",
+             "PSYS": "particle systems", "UILR": "UI layout"}
+
+
+def jv_pe_q(path, t, name):
+    if not re.search(r"64.?bit|32.?bit|\bx64\b|\bx86\b|\barm\b|architect|architettur|\bcompil\w*|\bbuilt\b|build date|"
+                     r"timestamp|\bsigned\b|signature|firma\w*|\bdll\b|\bconsole\b|\bgui\b|\.net|dotnet|subsystem|\bbit\b", t):
+        return False
+    pe = jv_pe(path)
+    if pe is None:
+        jarvis_say(f"{name} has a Windows-style header but I can't read its PE structure, sir: it may be damaged.")
+        return True
+    jarvis_say(f"{name}, sir:")
+    from datetime import timezone
+    built = ("not recorded" if pe["ts"] in (0, 0xFFFFFFFF) else
+             datetime.fromtimestamp(pe["ts"], tz=timezone.utc).strftime("%d/%m/%Y %H:%M UTC") +
+             "  (the builder can fake this date)")
+    for k, v in (("Architecture", pe["machine"]), ("Kind", "library (DLL)" if pe["dll"] else "program (EXE)"),
+                 ("Interface", pe["subsystem"]), ("Built", built),
+                 ("Digitally signed", "yes (a signature block is present; I don't validate it)" if pe["signed"] else "no signature block found"),
+                 (".NET", "yes, managed code" if pe["dotnet"] else "no (native code)")):
+        out(f"  {k.ljust(17)}: {v}")
+    out()
+    return True
+
+
+def jv_zip_q(path, t, orig, name):
+    h = lambda *pats: any(re.search(p, t) for p in pats)
+    if not h(r"entr(?:y|ies)", r"\binside\b", r"\bcontain", r"\blist\b", r"how many (?:files|items|things|documents)",
+             r"biggest|largest", r"unpack|extract|decompress|unzip", r"\bcompress", r"\bcontenut", r"\bdentro\b",
+             r"quanti file", r"più grand|piu grand", r"\bwhat'?s in\b", r"\bencrypt|password"):
+        return False
+    try:
+        z = zipfile.ZipFile(path)
+    except zipfile.BadZipFile:
+        jarvis_say(f"{name} does not open as a ZIP archive, sir: it may be damaged. Ask me 'is it corrupt'.")
+        return True
+    with z:
+        infos = z.infolist()
+    files = [i for i in infos if not i.is_dir()]
+    total, comp = sum(i.file_size for i in files), sum(i.compress_size for i in files)
+    enc = sum(1 for i in infos if i.flag_bits & 1)
+    if h(r"unpack|extract|decompress|unzip"):
+        jarvis_say("I never unpack archives, sir: I only list them. Here is what is inside.")
+    if h(r"biggest|largest|più grand|piu grand"):
+        top = sorted(files, key=lambda i: -i.file_size)[:5]
+        jarvis_say(f"The biggest entries of {name}:")
+        for i in top:
+            out(f"  {human(i.file_size).rjust(12)}  {safe(i.filename)}")
+        out()
+        return True
+    if h(r"\bencrypt|password"):
+        jarvis_say(f"{enc} of the {len(infos)} entries in {name} are password-protected, sir." if enc else
+                   f"No entry in {name} is password-protected, sir.")
+        return True
+    ratio = f", compressed to {human(comp)} ({comp * 100 // max(total, 1)}%)" if total else ""
+    jarvis_say(f"{name} holds {len(files):,} file(s) and {len(infos) - len(files):,} folder(s): {human(total)} unpacked{ratio}."
+               + (f" {enc} entr{'y is' if enc == 1 else 'ies are'} password-protected." if enc else ""))
+    if not h(r"how many", r"quanti"):
+        for i in infos[:30]:
+            out(f"  {human(i.file_size).rjust(12)}  {safe(i.filename)}")
+        if len(infos) > 30:
+            out(f"  ... and {len(infos) - 30:,} more", GRAY)
+    out()
+    return True
+
+
+def jv_sqlite_q(path, t, orig, name):
+    h = lambda *pats: any(re.search(p, t) for p in pats)
+    if not h(r"\btables?\b", r"\brows?\b", r"\bcolumns?\b", r"\bschema\b", r"\brecords?\b", r"\bdatabase\b",
+             r"\bfields?\b", r"\btabell\w+", r"\bcolonn\w+", r"\briga\b|\brighe\b", r"\bstruttura\b"):
+        return False
+    q = lambda n: '"' + n.replace('"', '""') + '"'
+    try:
+        con = sqlite_open_ro(path)
+    except sqlite3.Error as e:
+        jarvis_say(f"I can't open {name} as a database, sir ({safe(e)}).")
+        return True
+    try:
+        tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+        named = [n for n in tables if re.search(r"(?<![\w])" + re.escape(n.lower()) + r"(?![\w])", t)]
+        tab = max(named, key=len) if named else None
+        mnum = re.search(r"\b(\d{1,2})\b", t)
+        n = min(int(mnum.group(1)), 20) if mnum else 5
+        if tab and h(r"\bcolumns?\b", r"\bschema\b", r"\bfields?\b", r"\bcolonn\w+", r"\bstruttura\b"):
+            cols = con.execute(f"PRAGMA table_info({q(tab)})").fetchall()
+            jarvis_say(f"Table '{safe(tab)}' has {len(cols)} column(s):")
+            for c in cols:
+                out(f"  {safe(c[1]).ljust(28)} {safe(c[2] or 'no declared type')}{'  (primary key)' if c[5] else ''}")
+            out()
+        elif tab and h(r"\bfirst\b", r"\btop\b", r"\bsample\b", r"\bshow\b", r"\bprimi\b", r"\bpreview\b", r"\bcontents?\b",
+                       r"\bmostra\b", r"\bsome\b"):
+            cur = con.execute(f"SELECT * FROM {q(tab)} LIMIT {n}")
+            cols = [d[0] for d in cur.description]
+            jarvis_say(f"First {n} row(s) of '{safe(tab)}':")
+            out("  " + " | ".join(safe(c) for c in cols), YELLOW)
+            for row in cur.fetchall():
+                out("  " + " | ".join(f"<blob {len(v)} bytes>" if isinstance(v, bytes) else safe(v)[:40] for v in row))
+            out()
+        elif tab:
+            cnt = con.execute(f"SELECT COUNT(*) FROM {q(tab)}").fetchone()[0]
+            jarvis_say(f"Table '{safe(tab)}' has {cnt:,} row(s), sir.")
+        else:
+            res, total = sqlite_tables(path)
+            jarvis_say(f"{name} has {total} table(s), sir:")
+            for tn, c in res:
+                out(f"  {safe(tn).ljust(30)} {c:,} row(s)")
+            out()
+    except sqlite3.Error as e:
+        jarvis_say(f"The database refused that, sir ({safe(e)}).")
+    finally:
+        con.close()
+    return True
+
+
+def jv_jtype(v):
+    return {"dict": "an object", "list": "an array", "str": "a string", "int": "an integer", "float": "a number",
+            "bool": "a boolean", "NoneType": "null"}.get(type(v).__name__, type(v).__name__)
+
+
+def jv_json_q(path, t, orig, name):
+    h = lambda *pats: any(re.search(p, t) for p in pats)
+    try:
+        text, _ = read_text(path, 20 * 1024 * 1024)
+        data = json.loads(text.lstrip("\ufeff"))
+    except (ValueError, OSError) as e:
+        if h(r"\bkeys?\b", r"\bstructure\b", r"\bvalid\b", r"\bschema\b", r"\bvalue\b"):
+            jarvis_say(f"{name} is not valid JSON, sir: {safe(e)}.")
+            return True
+        return False
+    key = None
+    if isinstance(data, dict):
+        for k in data:
+            if len(str(k)) >= 3 and re.search(r"(?<![\w])" + re.escape(str(k).lower()) + r"(?![\w])", t):
+                if key is None or len(str(k)) > len(str(key)):
+                    key = k
+    for tok in re.findall(r"[\w\-]+(?:\.[\w\-]+)+", orig):          # dotted path: a.b.c
+        node, ok = data, True
+        for part in tok.split("."):
+            if isinstance(node, dict) and part in node:
+                node = node[part]
+            elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+                node = node[int(part)]
+            else:
+                ok = False
+                break
+        if ok and "." in tok and tok.lower() != name.lower():
+            jarvis_say(f"{safe(tok)} = {safe(json.dumps(node, ensure_ascii=False))[:300]}")
+            return True
+    asks = h(r"\bvalue\b", r"\bwhat(?:'s| is)\b", r"\bshow\b", r"\bget\b", r"\bqual\w*\b", r"\bmostra\b", r"\bdammi\b", r"\bvalore\b")
+    if key is not None and asks:
+        v = json.dumps(data[key], ensure_ascii=False)
+        jarvis_say(f"{safe(key)} is {jv_jtype(data[key])}: {safe(v)[:300]}{' ...' if len(v) > 300 else ''}")
+        return True
+    if not h(r"\bkeys?\b", r"\bstructure\b", r"\bschema\b", r"how many (?:items|elements|entries|objects|records)",
+             r"\bvalid\b", r"\bchiavi?\b", r"\bstruttura\b", r"\bitems?\b"):
+        return False
+    if isinstance(data, dict):
+        jarvis_say(f"{name} is valid JSON: an object with {len(data)} key(s):")
+        for k, v in list(data.items())[:25]:
+            extra = f" ({len(v)} item(s))" if isinstance(v, (list, dict)) else ""
+            out(f"  {safe(k)[:40].ljust(40)} {jv_jtype(v).split(' ', 1)[1]}{extra}")
+        if len(data) > 25:
+            out(f"  ... and {len(data) - 25} more", GRAY)
+    elif isinstance(data, list):
+        jarvis_say(f"{name} is valid JSON: an array with {len(data):,} item(s).")
+        if data and isinstance(data[0], dict):
+            out("  Keys of the first item: " + ", ".join(safe(k) for k in list(data[0])[:15]))
+    else:
+        jarvis_say(f"{name} is valid JSON holding {jv_jtype(data)}.")
+    out()
+    return True
+
+
+def jv_csv_q(path, t, orig, name):
+    import csv
+    h = lambda *pats: any(re.search(p, t) for p in pats)
+    try:
+        text, _ = read_text(path)
+    except OSError:
+        return False
+    lines = text.splitlines()
+    if not lines:
+        return False
+    delim = max(",;\t|", key=lines[0].count)
+    rows = list(csv.reader(lines, delimiter=delim))
+    header, data = rows[0], rows[1:]
+    lowh = [c.strip().lower() for c in header]
+    col = None
+    for i, c in enumerate(lowh):
+        if c and re.search(r"(?<![\w])" + re.escape(c) + r"(?![\w])", t) and (col is None or len(c) > len(lowh[col])):
+            col = i
+    trig = h(r"\bcolumns?\b", r"\bheaders?\b", r"\bfields?\b", r"\bcolonn\w+", r"\bintestazion\w+", r"\brows?\b", r"\brighe\b",
+             r"\brecords?\b", r"\baverage\b", r"\bmean\b", r"\bmedia\b", r"\bsum\b", r"\btotal\b", r"\bsomma\b", r"\btotale\b",
+             r"\bminimum\b|\bmin\b|\blowest\b|\bsmallest\b", r"\bmaximum\b|\bmax\b|\bhighest\b|\blargest\b|\bbiggest\b",
+             r"\bunique\b|\bdistinct\b|\bunici\b", r"\bmost common\b|\bfrequent\b", r"\bsample\b|\bpreview\b")
+    if not trig and col is None:
+        return False
+
+    def num(v):
+        v = v.strip().replace(" ", "")
+        try:
+            return float(v)
+        except ValueError:
+            if "," in v and delim != ",":
+                try:
+                    return float(v.replace(",", "."))
+                except ValueError:
+                    return None
+        return None
+
+    if col is not None and not h(r"\bcolumns?\b", r"\bheaders?\b"):
+        vals = [r[col].strip() for r in data if col < len(r) and r[col].strip() != ""]
+        nums = [x for x in (num(v) for v in vals) if x is not None]
+        cname = safe(header[col].strip())
+        if len(nums) >= max(1, len(vals) * 0.8) and not h(r"\bunique\b|\bdistinct\b|\bunici\b|\bmost common\b|\bfrequent\b"):
+            if h(r"\bsum\b|\btotal\b|\bsomma\b|\btotale\b") :
+                jarvis_say(f"The sum of '{cname}' is {jv_fmt(sum(nums))}, sir ({len(nums):,} values).")
+            elif h(r"\baverage\b|\bmean\b|\bmedia\b"):
+                jarvis_say(f"The average of '{cname}' is {jv_fmt(sum(nums) / len(nums))}, sir ({len(nums):,} values).")
+            elif h(r"\bminimum\b|\bmin\b|\blowest\b|\bsmallest\b"):
+                jarvis_say(f"The lowest '{cname}' is {jv_fmt(min(nums))}, sir.")
+            elif h(r"\bmaximum\b|\bmax\b|\bhighest\b|\blargest\b|\bbiggest\b"):
+                jarvis_say(f"The highest '{cname}' is {jv_fmt(max(nums))}, sir.")
+            else:
+                jarvis_say(f"'{cname}' is numeric, sir: {len(nums):,} values, sum {jv_fmt(sum(nums))}, "
+                           f"average {jv_fmt(sum(nums) / len(nums))}, min {jv_fmt(min(nums))}, max {jv_fmt(max(nums))}.")
+        else:
+            from collections import Counter
+            cnt = Counter(vals)
+            jarvis_say(f"'{cname}' has {len(vals):,} filled value(s), {len(cnt):,} distinct. Most common:")
+            for v, c in cnt.most_common(8):
+                out(f"  {str(c).rjust(7)} x  {safe(v)[:60]}")
+            out()
+        return True
+    if h(r"\bsample\b", r"\bpreview\b", r"\bfirst\b", r"\btop\b", r"\bshow\b") and h(r"\brows?\b", r"\brighe\b", r"\brecords?\b"):
+        mnum = re.search(r"\b(\d{1,3})\b", t)
+        n = min(int(mnum.group(1)), 50) if mnum else 5
+        jarvis_say(f"First {n} data row(s) of {name}:")
+        out("  " + " | ".join(safe(c) for c in header), YELLOW)
+        for r in data[:n]:
+            out("  " + " | ".join(safe(c)[:30] for c in r))
+        out()
+        return True
+    if h(r"\bcolumns?\b", r"\bheaders?\b", r"\bfields?\b", r"\bcolonn\w+", r"\bintestazion\w+"):
+        jarvis_say(f"{name} has {len(header)} column(s): " + ", ".join(safe(c.strip()) for c in header[:40]) + ".")
+        return True
+    jarvis_say(f"{name} has {len(data):,} data row(s) and {len(header)} column(s), sir.")
+    return True
+
+
+def jv_pdf_q(path, t, name):
+    if not re.search(r"\bpages?\b|\bpagine\b|\bencrypt\w*\b|\bpassword\b|\bcifrat\w+\b", t):
+        return False
+    with open(path, "rb") as f:
+        raw = f.read(20 * 1024 * 1024)
+    pages = len(re.findall(rb"/Type\s*/Page[^s]", raw))
+    enc = b"/Encrypt" in raw
+    if re.search(r"\bencrypt\w*\b|\bpassword\b|\bcifrat\w+\b", t):
+        jarvis_say(f"{name} {'is encrypted (it has an /Encrypt entry)' if enc else 'shows no encryption'}, sir.")
+    else:
+        jarvis_say(f"{name} has about {pages or 'an unknown number of'} page(s), sir"
+                   f"{' (the count may be off: some PDFs hide page objects in compressed streams)' if not pages else ''}.")
+    return True
+
+
+def jv_file_q(orig, t, path, explicit):
+    name = safe(os.path.basename(path))
+    try:
+        st = os.stat(path)
+    except OSError as e:
+        jarvis_say(f"I can't read {name}, sir ({e.strerror}).")
+        return True
+    size = st.st_size
+    kind = detect_kind(path)
+    ext = os.path.splitext(path)[1].lower()
+    is_text = kind.startswith("Text file")
+    is_gm = kind == "GameMaker data file" or os.path.basename(path).lower() == GM_FILE
+    h = lambda *pats: any(re.search(p, t) for p in pats)
+    fw = (not explicit) and h(r"\b(?:folders?|director(?:y|ies)|cartell\w+|here|qui)\b")
+    nonum = lambda: jarvis_say(f"{name} is not a text file ({kind}), sir, so it has no lines to speak of. "
+                               f"Ask me for 'the hex' instead.")
+
+    # 1. checksums (and comparing against a hash the person pastes)
+    if h(r"\bsha.?256\b", r"\bmd5\b", r"\bchecksums?\b", r"\bhash(?:es)?\b", r"\bdigest\b", r"\bimpronta\b"):
+        if size > MAX_HASH:
+            jarvis_say(f"{name} is larger than 256 MB, sir: I skip the checksums for files that big.")
+            return True
+        sha, md = digests(path)
+        want_sha, want_md = h(r"\bsha.?256\b") or not h(r"\bmd5\b"), h(r"\bmd5\b") or not h(r"\bsha.?256\b")
+        given = re.findall(r"\b[0-9a-fA-F]{64}\b|\b[0-9a-fA-F]{32}\b", orig)
+        if given:
+            for g in given:
+                real, label = (sha, "SHA256") if len(g) == 64 else (md, "MD5")
+                if g.upper() == real:
+                    jarvis_say(f"The {label} MATCHES, sir: {name} is exactly the file that hash describes.")
+                else:
+                    jarvis_say(f"The {label} does NOT match, sir. The file gives {real}; you gave {g.upper()}.")
+            return True
+        jarvis_say(f"Checksums of {name}, sir:")
+        if want_sha:
+            out(f"  SHA256 : {sha}")
+        if want_md:
+            out(f"  MD5    : {md}")
+        out()
+        return True
+
+    # 2. searching inside the file
+    searching = h(r"\b(?:search|find|look for|grep|cerca\w*|trova\w*|contain\w*|contiene|mention\w*|appears?|occurrences?|"
+                  r"occorrenz\w*)\b", r"how many times", r"quante volte")
+    if searching:
+        pron = h(r"\b(?:in|inside|within|dentro|nel|nello|from)\s+(?:it|this file|that file|the (?:selected )?file|questo file|quel file|il file|esso)\b",
+                 r"\b(?:does|do|did)\s+(?:it|this file|the file|that file)\b", r"\b(?:it|this file|the file)\s+(?:contain|mention|include)",
+                 r"\bcontiene\b", r"quante volte", r"how many times")
+        folderish_s = h(r"\b(?:folders?|director\w+|cartell\w+|pcs?|computer|everywhere|drives?|disk|here|qui|downloads|desktop)\b")
+        content_verb = h(r"\b(?:search|grep|look for|cerca\w*)\b") or bool(re.search(r"[\"“`]", orig))
+        term = jv_term(orig, t, path) if (explicit or pron or (content_verb and not folderish_s)) else None
+        if term:
+            jv_search(path, term, kind, name)
+            return True
+
+    # 3. showing lines / hex
+    m = (re.search(r"\b(?:first|top|head|primi|prime|prima)\s+(\d+)\s+(?:lines?|righe)\b", t)
+         or re.search(r"\b(?:first|top|head|primi|prime)\s+(?:lines?|righe)\b", t))
+    if m:
+        if not is_text:
+            nonum()
+            return True
+        n = min(int(m.group(1)) if m.groups() else 10, 200)
+        lines = read_text(path)[0].splitlines()
+        jarvis_say(f"First {min(n, len(lines))} line(s) of {name}:")
+        for i, ln in enumerate(lines[:n], 1):
+            out(f"  {i:>6} | {safe(ln)[:120]}")
+        out()
+        return True
+    m = (re.search(r"\b(?:last|bottom|tail|ultim[ei])\s+(\d+)\s+(?:lines?|righe)\b", t)
+         or re.search(r"\b(?:last|bottom|tail|ultim[ei])\s+(?:lines?|righe)\b", t))
+    if m:
+        if not is_text:
+            nonum()
+            return True
+        n = min(int(m.group(1)) if m.groups() else 10, 200)
+        lines = read_text(path)[0].splitlines()
+        start = max(0, len(lines) - n)
+        jarvis_say(f"Last {len(lines) - start} line(s) of {name}:")
+        for i, ln in enumerate(lines[start:], start + 1):
+            out(f"  {i:>6} | {safe(ln)[:120]}")
+        out()
+        return True
+    m = re.search(r"\blines?\s+(\d+)\s*(?:to|-|through|and|a|e)\s*(\d+)\b", t) or \
+        re.search(r"\brighe\s+(?:da\s+)?(\d+)\s*(?:a|-|to)\s*(\d+)\b", t)
+    if m:
+        if not is_text:
+            nonum()
+            return True
+        a, b = int(m.group(1)), min(int(m.group(2)), int(m.group(1)) + 199)
+        lines = read_text(path)[0].splitlines()
+        jarvis_say(f"Lines {a} to {min(b, len(lines))} of {name} ({len(lines):,} in total):")
+        for i in range(max(a, 1), min(b, len(lines)) + 1):
+            out(f"  {i:>6} | {safe(lines[i - 1])[:120]}")
+        out()
+        return True
+    m = re.search(r"\b(?:line|riga)\s+(?:number\s+|numero\s+)?(\d+)\b", t)
+    if m:
+        if not is_text:
+            nonum()
+            return True
+        lines = read_text(path)[0].splitlines()
+        i = int(m.group(1))
+        if 1 <= i <= len(lines):
+            jarvis_say(f"Line {i} of {name}:")
+            out(f"  {i:>6} | {safe(lines[i - 1])[:200]}")
+        else:
+            jarvis_say(f"{name} has only {len(lines):,} line(s), sir.")
+        out()
+        return True
+    if h(r"\bhex(?:dump)?\b", r"\besadecimal\w*\b", r"\b(?:first|primi)\s+\d+\s+bytes?\b", r"\bbytes? at offset\b", r"\boffset\b"):
+        mn = re.search(r"\b(\d+)\s+bytes?\b", t)
+        mo = re.search(r"\boffset\s+(0x[0-9a-f]+|\d+)\b", t)
+        n = min(int(mn.group(1)), 512) if mn else 128
+        off = int(mo.group(1), 16 if mo.group(1).startswith("0x") else 10) if mo else 0
+        with open(path, "rb") as f:
+            f.seek(min(off, size))
+            data = f.read(n)
+        jarvis_say(f"{len(data)} byte(s) of {name} from offset 0x{off:X} (viewing only, nothing is executed):")
+        for r in jv_hex_rows(data, off):
+            out(r)
+        out()
+        return True
+
+    # 4. counts and encoding
+    if h(r"\bhow many (?:lines?|words?|characters?|chars?|letters?|righe|parole|caratteri)\b", r"\bnumber of (?:lines|words|characters)\b",
+         r"\bquant[ie] (?:righe|parole|caratteri)\b", r"\bword count\b", r"\bline count\b", r"\bconta (?:le )?(?:righe|parole)\b",
+         r"\bcount (?:the )?(?:lines|words|characters)\b"):
+        if not is_text:
+            nonum()
+            return True
+        text, enc = read_text(path)
+        part = " (first 5 MB only)" if size > MAX_TEXT else ""
+        if ext in (".csv", ".tsv") and h(r"\brows?\b|\brecords?\b|\brighe\b"):
+            jarvis_say(f"{name} has {max(len(text.splitlines()) - 1, 0):,} data row(s) plus the header, sir{part}.")
+        else:
+            jarvis_say(f"{name}: {len(text.splitlines()):,} line(s), {len(text.split()):,} word(s), {len(text):,} character(s){part}.")
+        return True
+    if h(r"\bencoding\b", r"\bcodifica\b", r"\bcharset\b", r"\butf.?8\b", r"\butf.?16\b") and is_text:
+        enc = read_text(path)[1]
+        jarvis_say(f"{name} is encoded as {enc}, sir.")
+        return True
+
+    # 5. is it damaged?
+    if h(r"\bcorrupt\w*\b", r"\bcorrott\w*\b", r"\bdamaged?\b", r"\bdanneggiat\w*\b", r"\bbroken\b", r"\brott[oi]\b", r"\bintact\b",
+         r"\bintegr\w*\b", r"\btruncat\w*\b", r"\btroncat\w*\b", r"\btamper\w*\b", r"\bvalid\b(?!\s+json)", r"\bhealthy\b", r"\bsano\b",
+         r"\bis it (?:ok|fine)\b", r"\bsafe to open\b"):
+        lead = h(r"^(?:is|are|does|do|did|can|could|has|have|will|would|should|è|e'|sono|sembra|looks?|seems?|check|verify|"
+                 r"test|controlla|verifica|testa|scan)\b")
+        wide = h(r"\b(?:pc|computer|whole|entire|everything|folder|cartella|tutto|intero|all files|every file|games?)\b")
+        if (explicit or lead) and not wide:
+            jv_corrupt_q(path, kind, name, ext)
+            return True
+
+    # 6. image size
+    if h(r"\bdimensions?\b", r"\bresolution\b", r"\bpixels?\b", r"\brisoluzione\b", r"how (?:wide|tall)\b", r"\bwidth\b",
+         r"\bheight\b", r"\blarghezza\b", r"\baltezza\b", r"\baspect ratio\b"):
+        dim = image_size(path, kind) if kind.endswith("image") else None
+        if dim:
+            from math import gcd
+            g = gcd(dim[0], dim[1]) or 1
+            jarvis_say(f"{name} is {dim[0]} x {dim[1]} pixels (aspect ratio {dim[0] // g}:{dim[1] // g}), sir.")
+        elif kind.endswith("image"):
+            jarvis_say(f"{name} is an image but I couldn't read its dimensions, sir. It may be damaged.")
+        else:
+            jarvis_say(f"{name} is not an image I can measure ({kind}), sir.")
+        return True
+
+    # 7. where is it
+    if h(r"\bwhere (?:is|are)\s+(?:it|this|that|the file)\b", r"\bpath\b", r"\blocation\b", r"\bpercorso\b", r"\bdove si trova\b",
+         r"\bfull ?name\b") and not h(r"\bwhere is the\b.*\b(?:text|word)\b"):
+        jarvis_say(f"{name} lives at: {safe(os.path.abspath(path))}" + (f"  (looks like: {store_of(path)})" if is_gm else ""))
+        return True
+
+    # 8. type-specific questions
+    if is_gm and jv_gm_q(path, t, name):
+        return True
+    if kind == "Windows executable" and jv_pe_q(path, t, name):
+        return True
+    if is_zip(kind) and jv_zip_q(path, t, orig, name):
+        return True
+    if kind == "SQLite database" and jv_sqlite_q(path, t, orig, name):
+        return True
+    if ext == ".json" and jv_json_q(path, t, orig, name):
+        return True
+    if ext in (".csv", ".tsv") and is_text and jv_csv_q(path, t, orig, name):
+        return True
+    if kind == "PDF document" and jv_pdf_q(path, t, name):
+        return True
+
+    # 9. dates, size, type
+    if not fw and h(r"\b(?:when|quando)\b.*\b(?:modif\w*|creat\w*|chang\w*|updat\w*|edit\w*|sav\w*|made|born|download\w*|open\w*|access\w*|aperto)\b",
+                    r"\blast (?:modified|write|changed|updated|edited|opened|accessed)\b", r"\bultima modifica\b", r"\bmodificat[oa]\b",
+                    r"\bcreat[oa]\b", r"\bhow old\b", r"\bquanto (?:è )?vecchio\b", r"\bdata di (?:modifica|creazione)\b", r"\bdate\b"):
+        fmt = lambda ts: datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M:%S") + f"  ({jv_ago(ts)})"
+        born = getattr(st, "st_birthtime", st.st_ctime)
+        label = "Created" if os.name == "nt" or hasattr(st, "st_birthtime") else "Status changed"
+        if h(r"\bcreat\w*\b", r"\bborn\b", r"\bmade\b", r"\bhow old\b", r"\bvecchio\b", r"\bcreazione\b"):
+            jarvis_say(f"{name} was {label.lower()} on {fmt(born)}, sir.")
+        elif h(r"\bmodif\w*\b", r"\bchang\w*\b", r"\bupdat\w*\b", r"\bedit\w*\b", r"\bsav\w*\b", r"\bwrite\b"):
+            jarvis_say(f"{name} was last modified on {fmt(st.st_mtime)}, sir.")
+        elif h(r"\bopen\w*\b", r"\baccess\w*\b", r"\baperto\b"):
+            jarvis_say(f"{name} was last accessed on {fmt(st.st_atime)}, sir (some systems don't update this).")
+        else:
+            jarvis_say(f"Dates of {name}, sir:")
+            out(f"  {label.ljust(14)}: {fmt(born)}")
+            out(f"  Modified      : {fmt(st.st_mtime)}")
+            out(f"  Accessed      : {fmt(st.st_atime)}")
+            out()
+        return True
+    if not fw and h(r"\bhow (?:big|large|heavy)\b", r"\bsize\b", r"\bquanto pesa\b", r"\bpeso\b", r"\bdimension[ei]\b",
+                    r"\bhow much (?:space|room)\b", r"\bquanto (?:spazio|è grande)\b", r"\bweigh\b"):
+        extra = ""
+        try:
+            if is_zip(kind):
+                with zipfile.ZipFile(path) as z:
+                    extra = f" Unpacked it would be about {human(sum(i.file_size for i in z.infolist()))}."
+            elif kind == "GZIP archive" and size >= 4:
+                with open(path, "rb") as f:
+                    f.seek(-4, 2)
+                    extra = f" Unpacked it would be about {human(struct.unpack('<I', f.read(4))[0])} (from the gzip trailer)."
+        except (OSError, zipfile.BadZipFile):
+            pass
+        jarvis_say(f"{name} weighs {human(size)}" + (f" ({size:,} bytes)" if size >= 1024 else "") + f", sir.{extra}")
+        return True
+    if not fw and h(r"\bwhat (?:type|kind|sort) of file\b", r"\bwhat (?:format|type|kind)\b", r"\bche (?:tipo|formato)\b", r"\bwhat is (?:it|this|that)\b",
+                    r"\bwhat file is (?:it|this)\b", r"\bfile type\b", r"\bextension\b", r"\bestensione\b", r"\bmime\b", r"\bcos'?è\b",
+                    r"\bwhat'?s this\b", r"\bwhat is the file\b"):
+        mime = "application/octet-stream" if is_gm else (mimetypes.guess_type(path)[0] or "unknown")
+        jarvis_say(f"{name} is a {kind}, sir: extension {ext or '(none)'}, MIME type {mime}, {human(size)}.")
+        return True
+    return False
+
+
+# ---------------- folder-level questions ----------------
+def jv_filter(orig, t):
+    """(predicate, description) from words like 'png files', '*.txt', 'named report', or None."""
+    import fnmatch
+    exts, names, globs = set(), [], []
+    for m in re.finditer(r"(?<![\w.])\*?\.([a-z0-9]{1,6})\b", t):
+        exts.add(m.group(1))
+    for w in re.findall(r"\b(" + "|".join(JV_EXTWORDS) + r")s?\b", t):
+        exts.add(w)
+    for words, cat in JV_CATS:
+        if any(re.search(r"\b" + re.escape(w) + r"\b", t) for w in words):
+            exts.update(cat)
+    globs = [g for g in re.findall(r"[\w.\-*?]*[*?][\w.\-*?]*", orig) if len(g) > 1 and not re.fullmatch(r"\*?\.[a-z0-9]{1,6}", g.lower())
+             and not re.fullmatch(r"\*\.[a-z0-9]{1,6}", g.lower())]
+    for m in re.finditer(r'"([^"]+)"|`([^`]+)`|“([^”]+)”', orig):
+        s = next(g for g in m.groups() if g)
+        if not os.path.exists(os.path.expanduser(s)):
+            names.append(s)
+    m = re.search(r"(?:named|called|name contains|containing|chiamat[oi]|nome)\s+([\w.\- ]+?)(?:\s+(?:in|inside|on|from|under|within|here)\b|$)", t)
+    if m and not names:
+        names.append(m.group(1).strip())
+    if not (exts or names or globs):
+        m = re.match(r"^(?:find|search(?: for)?|locate|where is|where are|trova|cerca|dov['’]?\s?[eè])\s+(?:the\s+|my\s+|il\s+|la\s+|i\s+)?"
+                     r"(?:file\s+)?(?:called\s+|named\s+)?([\w.\-]+)(?:\s+(?:in|inside|under|within|nel|nella|here|qui)\b.*)?$", t)
+        block = {"my", "games", "game", "files", "file", "everything", "it", "something", "anything", "stuff", "data.win",
+                 "corrupt", "folders", "folder", "giochi", "gioco", "tutto", "duplicates", "duplicati", "the", "all"}
+        if m and m.group(1) not in block:
+            names.append(m.group(1))
+    if not (exts or names or globs):
+        return None
+
+    def pred(p):
+        n = os.path.basename(p).lower()
+        e = os.path.splitext(n)[1].lstrip(".")
+        return ((not exts or e in exts) and all(fnmatch.fnmatch(n, g.lower()) for g in globs)
+                and all(s.lower() in n for s in names))
+    desc = ", ".join(filter(None, [("*." + "/".join(sorted(exts)) if exts and len(exts) <= 4 else ("%d file types" % len(exts) if exts else "")),
+                                   ("matching " + " ".join(globs)) if globs else "",
+                                   ("with '" + "' and '".join(names) + "' in the name") if names else ""]))
+    return pred, desc
+
+
+def jv_walk(scope, recurse, cap=200000):
+    res, capped = [], False
+    if recurse:
+        for cur, ds, fs in os.walk(scope, onerror=lambda e: None):
+            ds[:] = [d for d in ds if not skip_dir(os.path.join(cur, d))]
+            for f in fs:
+                p = os.path.join(cur, f)
+                try:
+                    stt = os.lstat(p)
+                except OSError:
+                    continue
+                res.append((p, stt.st_size, stt.st_mtime))
+                if len(res) >= cap:
+                    return res, True
+    else:
+        try:
+            names = os.listdir(scope)
+        except OSError:
+            return res, False
+        for f in names:
+            p = os.path.join(scope, f)
+            try:
+                stt = os.lstat(p)
+            except OSError:
+                continue
+            if stat.S_ISREG(stt.st_mode) and not nascosto(p, f):
+                res.append((p, stt.st_size, stt.st_mtime))
+    return res, capped
+
+
+def jv_rows(rows, base, limit=25):
+    for p, sz, mt in rows[:limit]:
+        out(f"  {human(sz).rjust(11)}  {datetime.fromtimestamp(mt).strftime('%d/%m/%Y %H:%M')}  {jv_rel(p, base)}")
+    if len(rows) > limit:
+        out(f"  ... and {len(rows) - limit:,} more", GRAY)
+    out()
+
+
+def jv_size_of(txt):
+    m = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*(bytes?|kb|mb|gb|tb|b)", txt.strip().lower())
+    n = float(m.group(1).replace(",", "."))
+    mult = {"b": 1, "byte": 1, "bytes": 1, "kb": 1 << 10, "mb": 1 << 20, "gb": 1 << 30, "tb": 1 << 40}[m.group(2)]
+    return int(n * mult)
+
+
+def jv_folder_q(orig, t, scope, explicit_dir):
+    h = lambda *pats: any(re.search(p, t) for p in pats)
+    base = os.path.abspath(scope)
+    where = "this folder" if not explicit_dir else safe(os.path.basename(base) or base)
+    explicit_flat = h(r"\b(?:only|just|top.?level|directly|non.?recurs\w*|solo|soltanto)\b")
+    wants_deep = h(r"recurs", r"sub-?folders?", r"sottocartell", r"\bbelow\b", r"\beverything\b", r"\btutt[oi]\b", r"\bdeep\b")
+    recurse = wants_deep or not (explicit_flat or h(r"\b(?:here|qui)\b"))
+    scope_txt = "this folder and everything below it" if recurse else "this folder only"
+    if explicit_dir:
+        scope_txt = scope_txt.replace("this folder", where)
+
+    # find / count by type, name or pattern
+    trigger = h(r"\b(?:find|search|locate|look for|where (?:is|are)|show (?:me )?(?:all|every)|list (?:all|every|the)|display all|"
+                r"trova\w*|cerca\w*|dov['’]?\s?[eè]|mostra\w* (?:tutt\w+|ogni)|elenca\w*)\b", r"\bhow many\b", r"\bquant[ie]\b")
+    if trigger:
+        flt = jv_filter(orig, t)
+        if flt:
+            pred, desc = flt
+            everywhere = h(r"\beverywhere\b", r"\bwhole (?:pc|computer)\b", r"\bentire (?:pc|computer)\b", r"\ball (?:drives|disks)\b",
+                           r"\bany drive\b", r"\btutto il (?:pc|computer)\b", r"\bovunque\b")
+            roots = pc_roots() if everywhere else [base]
+            if everywhere:
+                jarvis_say("Searching the whole computer, sir. Read-only; Ctrl+C stops me.")
+            found, scanned, stopped = [], 0, False
+            try:
+                for root in roots:
+                    for cur, ds, fs in os.walk(root, onerror=lambda e: None):
+                        ds[:] = sorted(d for d in ds if not skip_dir(os.path.join(cur, d)))
+                        for f in sorted(fs):
+                            scanned += 1
+                            p = os.path.join(cur, f)
+                            if pred(p):
+                                found.append(p)
+                        if not recurse and not everywhere:
+                            break
+                        if scanned > 1500000:
+                            stopped = True
+                            break
+            except KeyboardInterrupt:
+                stopped = True
+            where_txt = "the whole computer" if everywhere else scope_txt
+            if not found:
+                jarvis_say(f"I found no files {desc} in {where_txt}, sir ({scanned:,} files looked at).")
+                return True
+            jarvis_say(f"{len(found):,} file(s) {desc} in {where_txt}, sir ({scanned:,} files looked at"
+                       f"{'; stopped early, the list may be incomplete' if stopped else ''}).")
+            rows = []
+            for p in found[:40]:
+                try:
+                    stt = os.stat(p)
+                    rows.append((p, stt.st_size, stt.st_mtime))
+                except OSError:
+                    pass
+            for i, (p, sz, mt) in enumerate(rows, 1):
+                out(f"  [{i:>2}] {human(sz).rjust(11)}  {jv_rel(p, None if everywhere else base)}")
+            if len(found) > 40:
+                out(f"  ... and {len(found) - 40:,} more", GRAY)
+            CONTESTO["jlist"] = found[:200]
+            out()
+            jarvis_say("Say 'open 1' (or the number you like) to look inside one of them.")
+            return True
+
+    # duplicates
+    if h(r"\bduplicat\w*\b", r"\bduplicati\b", r"\bidentical files\b", r"\bsame files?\b", r"\bcopies\b", r"\bcopie\b"):
+        files, capped = jv_walk(base, recurse)
+        by_size = {}
+        for p, sz, _ in files:
+            if sz > 0:
+                by_size.setdefault(sz, []).append(p)
+        groups, hashed, skipped = [], 0, 0
+        try:
+            for sz, ps in by_size.items():
+                if len(ps) < 2:
+                    continue
+                if sz > 200 * 1024 * 1024 or hashed >= 3000:
+                    skipped += len(ps)
+                    continue
+                by_hash = {}
+                for p in ps:
+                    try:
+                        by_hash.setdefault(digests(p)[0], []).append(p)
+                        hashed += 1
+                    except OSError:
+                        pass
+                groups += [(sz, g) for g in by_hash.values() if len(g) > 1]
+        except KeyboardInterrupt:
+            jarvis_say("Stopped, sir. The list is partial.")
+        if not groups:
+            jarvis_say(f"No duplicate files in {scope_txt}, sir ({len(files):,} files compared).")
+            return True
+        waste = sum((len(g) - 1) * sz for sz, g in groups)
+        jarvis_say(f"{len(groups)} group(s) of identical files in {scope_txt}, sir. Deleting copies would free {human(waste)} "
+                   "(I never delete anything myself).")
+        for sz, g in sorted(groups, key=lambda x: -x[0] * (len(x[1]) - 1))[:10]:
+            out(f"  {human(sz)} x {len(g)}", YELLOW)
+            for p in g[:6]:
+                out(f"      {jv_rel(p, base)}")
+        if skipped:
+            out(f"  ({skipped} file(s) over 200 MB or beyond the hashing cap were not compared)", GRAY)
+        out()
+        return True
+
+    # bigger / smaller than
+    m = re.search(r"\b(bigger|larger|greater|over|above|more than|heavier than|piu di|più di|oltre|sopra|maggiore di|"
+                  r"smaller|less than|under|below|lighter than|meno di|sotto|minore di)\s+(?:than\s+)?(\d+(?:[.,]\d+)?\s*(?:bytes?|kb|mb|gb|tb|b))\b", t)
+    if m:
+        limit = jv_size_of(m.group(2))
+        bigger = m.group(1) in ("bigger", "larger", "greater", "over", "above", "more than", "heavier than", "piu di", "più di",
+                                "oltre", "sopra", "maggiore di")
+        files, capped = jv_walk(base, recurse)
+        rows = sorted([r for r in files if (r[1] > limit if bigger else r[1] < limit)], key=lambda r: -r[1])
+        jarvis_say(f"{len(rows):,} file(s) {'over' if bigger else 'under'} {human(limit)} in {scope_txt}, sir.")
+        jv_rows(rows, base)
+        CONTESTO["jlist"] = [r[0] for r in rows[:200]]
+        return True
+
+    # recently modified
+    mt, vague = None, False
+    if h(r"\bmodified\b", r"\bchanged\b", r"\bupdated\b", r"\bcreated\b", r"\bmodificat\w*\b", r"\bnew files\b", r"\brecent\w*\b"):
+        now = time.time()
+        lt = time.localtime()
+        midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+        mm = re.search(r"\b(?:last|past|ultim[ie])\s+(\d+)\s+(hours?|ore|days?|giorni|weeks?|settimane|months?|mesi|minutes?|minuti)\b", t)
+        if mm:
+            unit = mm.group(2)
+            secs = 3600 if unit.startswith(("hour", "ore")) else 60 if unit.startswith("minut") else \
+                604800 if unit.startswith(("week", "settim")) else 2592000 if unit.startswith(("month", "mes")) else 86400
+            mt, label = now - int(mm.group(1)) * secs, f"in the last {mm.group(1)} {unit}"
+        elif h(r"\btoday\b", r"\boggi\b"):
+            mt, label = midnight, "today"
+        elif h(r"\byesterday\b", r"\bieri\b"):
+            mt, label = midnight - 86400, "since yesterday"
+        elif h(r"\bthis week\b", r"\bquesta settimana\b"):
+            mt, label = now - 7 * 86400, "in the last 7 days"
+        elif h(r"\brecent\w*\b", r"\bnew files\b"):
+            mt, label, vague = now - 7 * 86400, "in the last 7 days", True
+    if mt is not None and (not vague or h(r"\bfiles?\b", r"\bwhat\b", r"\bwhich\b", r"\bshow\b", r"\blist\b", r"\bquali\b", r"\bcosa\b")):
+        files, capped = jv_walk(base, recurse)
+        rows = sorted([r for r in files if r[2] >= mt], key=lambda r: -r[2])
+        jarvis_say(f"{len(rows):,} file(s) touched {label} in {scope_txt}, sir.")
+        jv_rows(rows, base)
+        CONTESTO["jlist"] = [r[0] for r in rows[:200]]
+        return True
+
+    # empty files / folders
+    if h(r"\bempty\b", r"\bzero.?byte\b", r"\b0.?byte\b", r"\bvuot[ioe]\b"):
+        if h(r"\bfolders?\b", r"\bdirector\w+\b", r"\bcartell\w+\b"):
+            res = []
+            for cur, ds, fs in os.walk(base, onerror=lambda e: None):
+                ds[:] = [d for d in ds if not skip_dir(os.path.join(cur, d))]
+                for d in ds:
+                    try:
+                        if not os.listdir(os.path.join(cur, d)):
+                            res.append(os.path.join(cur, d))
+                    except OSError:
+                        pass
+                if not recurse:
+                    break
+            jarvis_say(f"{len(res):,} empty folder(s) in {scope_txt}, sir.")
+            for p in res[:25]:
+                out(f"  {jv_rel(p, base)}")
+            out()
+        else:
+            files, capped = jv_walk(base, recurse)
+            rows = [r for r in files if r[1] == 0]
+            jarvis_say(f"{len(rows):,} empty (0-byte) file(s) in {scope_txt}, sir.")
+            jv_rows(rows, base)
+            CONTESTO["jlist"] = [r[0] for r in rows[:200]]
+        return True
+
+    # breakdown by extension
+    if h(r"\bby (?:extension|type)\b", r"\bfile types?\b", r"\bwhat kinds? of files\b", r"\bwhich extensions\b", r"\btipi di file\b",
+         r"\bper estensione\b", r"\bbreakdown\b", r"\bextensions?\b"):
+        files, capped = jv_walk(base, recurse)
+        agg = {}
+        for p, sz, _ in files:
+            e = os.path.splitext(p)[1].lower() or "(none)"
+            c, s = agg.get(e, (0, 0))
+            agg[e] = (c + 1, s + sz)
+        jarvis_say(f"{len(files):,} file(s) in {scope_txt}, sir, by type:")
+        for e, (c, s) in sorted(agg.items(), key=lambda kv: -kv[1][0])[:15]:
+            out(f"  {e.ljust(10)} {str(c).rjust(7)} file(s)  {human(s).rjust(12)}")
+        if len(agg) > 15:
+            out(f"  ... and {len(agg) - 15} more type(s)", GRAY)
+        out()
+        return True
+
+    # rankings
+    rk = re.search(r"\b(biggest|largest|heaviest|smallest|lightest|newest|latest|most recent|oldest|più grand\w*|piu grand\w*|"
+                   r"più pesant\w*|più piccol\w*|più recent\w*|piu recent\w*|più vecchi\w*|piu vecchi\w*)\b", t) or \
+        re.search(r"\b(last modified|recently modified|ultim\w+ modific\w+)\b", t)
+    if rk and h(r"\bfiles?\b", r"\bfolders?\b", r"\bcartell\w+\b", r"\bdirector\w+\b", r"\bitems?\b"):
+        w = rk.group(1)
+        mn = re.search(r"\b(?:top\s+)?(\d{1,2})\b", t)
+        n = int(mn.group(1)) if mn else 5
+        if h(r"\bfolders?\b", r"\bcartell\w+\b", r"\bdirector\w+\b") and not h(r"\bfiles?\b"):
+            try:
+                subs = [os.path.join(base, d) for d in os.listdir(base) if os.path.isdir(os.path.join(base, d))
+                        and not skip_dir(os.path.join(base, d))]
+            except OSError:
+                subs = []
+            sized = []
+            try:
+                for d in subs:
+                    sized.append((d,) + count_folder(d)[:3])
+            except KeyboardInterrupt:
+                jarvis_say("Stopped, sir. The list is partial.")
+            small = w in ("smallest", "lightest", "più piccol", "più piccolo")
+            sized.sort(key=lambda r: r[3], reverse=small)
+            if not sized:
+                jarvis_say("There are no sub-folders here, sir.")
+                return True
+            jarvis_say(f"{'Smallest' if small else 'Biggest'} sub-folders of {where}, sir:")
+            for d, nf, nd, sz in (sized if small else sized[:n])[:n]:
+                out(f"  {human(sz).rjust(11)}  {nf:,} file(s)  {jv_rel(d, base)}")
+            out()
+            CONTESTO["jlist"] = [r[0] for r in sized[:n]]
+            return True
+        files, capped = jv_walk(base, recurse)
+        if not files:
+            jarvis_say(f"There are no files in {scope_txt}, sir.")
+            return True
+        if re.match(r"(biggest|largest|heaviest|più grand|piu grand|più pesant)", w):
+            rows, what = sorted(files, key=lambda r: -r[1]), "Biggest"
+        elif re.match(r"(smallest|lightest|più piccol)", w):
+            rows, what = sorted(files, key=lambda r: r[1]), "Smallest"
+        elif re.match(r"(oldest|più vecchi|piu vecchi)", w):
+            rows, what = sorted(files, key=lambda r: r[2]), "Oldest"
+        else:
+            rows, what = sorted(files, key=lambda r: -r[2]), "Newest"
+        top = rows[0]
+        jarvis_say(f"{what}: {jv_rel(top[0], base)}, {human(top[1])}, {datetime.fromtimestamp(top[2]).strftime('%d/%m/%Y %H:%M')}"
+                   f" (out of {len(files):,} file(s) in {scope_txt}).")
+        if n > 1:
+            jv_rows(rows[:n], base, n)
+        CONTESTO["jlist"] = [r[0] for r in rows[:max(n, 5)]]
+        return True
+
+    # counts
+    if h(r"\bhow many\b.*\b(?:files?|folders?|director\w+|dirs?|items?|elements?|subfolders?)\b", r"\bnumber of (?:files?|folders?|items?)\b",
+         r"\bquant[ie]\s+(?:file|cartell\w+|element\w+|oggett\w+)\b"):
+        if CONTESTO.get("file") and not explicit_dir and not h(r"\b(?:here|qui|folder|director\w+|cartell\w+|dir)\b"):
+            return False                      # keep the old behaviour: a selected file gets its pluton report
+        try:
+            names = os.listdir(base)
+        except OSError as e:
+            jarvis_say(f"I can't read {where}, sir ({e.strerror}).")
+            return True
+        nf = sum(1 for n in names if os.path.isfile(os.path.join(base, n)))
+        nd = sum(1 for n in names if os.path.isdir(os.path.join(base, n)))
+        files, dirs, size, capped = count_folder(base)
+        jarvis_say(f"{where.capitalize()} holds {nf:,} file(s) and {nd:,} folder(s) directly. Counting everything below: "
+                   f"{files:,}{'+' if capped else ''} file(s) in {dirs:,} folder(s), {human(size)} in total.")
+        return True
+
+    # total size of a folder
+    if h(r"\b(?:how big|how large|how much (?:space|disk)|total size|size of|weigh|weighs|quanto pesa|quanto spazio|dimensione|peso)\b") \
+            and (explicit_dir or h(r"\b(?:folder|director\w+|cartella|here|qui)\b")):
+        files, dirs, size, capped = count_folder(base)
+        jarvis_say(f"{where.capitalize()} weighs {human(size)}{'+' if capped else ''}: {files:,} file(s) in {dirs:,} folder(s), sir.")
+        return True
+
+    if h(r"\bhidden\b", r"\bnascost\w+\b") and h(r"\bfiles?\b", r"\bfolders?\b", r"\bwhat\b", r"\bshow\b"):
+        try:
+            hid = [n for n in os.listdir(base) if nascosto(os.path.join(base, n), n)]
+        except OSError:
+            hid = []
+        jarvis_say(f"{len(hid)} hidden item(s) in {where}, sir." + (":" if hid else ""))
+        for n in sorted(hid, key=str.lower)[:30]:
+            out(f"  {safe(n)}")
+        out()
+        return True
+    return False
+
+
+def jv_needs_file(t):
+    """Questions that only make sense about one file, asked when no file is known."""
+    return bool(re.search(r"\bhow many (?:lines?|words?|characters?|chars?|righe|parole|caratteri)\b|\b(?:first|last|top|head|tail|primi|ultim[ei])"
+                          r"\s+\d*\s*(?:lines?|righe)\b|\bencoding\b|\bdimensions?\b|\bhow many pages\b|\bhex(?:dump)?\b|\bcolumns? of\b"
+                          r"|\bwhich (?:keys|tables)\b|\bwhat game is\b", t))
+
+
+def _jv_deep(orig, t, sel):
+    if jv_selection(orig, t, sel) or jv_open_request(orig, t, sel) or jv_navigate(orig, t):
+        return True
+    if jv_examples(t) or jv_global(t):
+        return True
+    path, explicit = jv_target(orig, t, sel)
+    if not explicit:
+        missing = [k for k in jv_filename_tokens(orig) if not os.path.exists(os.path.expanduser(k))
+                   and not (k.lower() == GM_FILE and re.match(r"(?:find|search|locate|where|trova|cerca|dov)", t))]
+        if missing:
+            jarvis_say(f"I can't find '{safe(missing[0])}', sir: not in this folder nor in the three levels below it.")
+            close = difflib.get_close_matches(missing[0].lower(), [n.lower() for n in os.listdir(".")], n=3, cutoff=0.5)
+            if close:
+                jarvis_say("Did you mean: " + ", ".join(safe(n) for n in close) + "?")
+            return True
+    if path is None:
+        if jv_needs_file(t):
+            jarvis_say("Which file, sir? Say 'open <file>' first, or name it in the question.")
+            show_file_choices()
+            return True
+        return jv_folder_q(orig, t, ".", False)
+    if os.path.isfile(path):
+        if jv_file_q(orig, t, path, explicit):
+            return True
+        if jv_folder_q(orig, t, ".", False):
+            return True
+        if explicit:                                        # a named file with a generic request
+            if re.search(r"\b(?:describe|summar\w*|overview|riassum\w*|panoramica|everything about|tutto su)\b", t):
+                extract_port([path])
+                interact_port([path])
+                return True
+            if re.search(r"\b(?:battery|batteria|memory|memoria|ram|resources|consum\w*|usage)\b", t):
+                pluton_key([path] + (["-Watch", "60"] if re.search(r"\b(?:watch|monitor|track|measure|misura)\b", t) else []))
+                return True
+            if re.search(r"\b(?:inside|content|contents|preview|look in|what'?s in|dentro|contenuto|show)\b", t):
+                interact_port([path])
+                return True
+            if re.search(r"\b(?:info|inspect|detail|details|metadata|tell me about|about|analy\w*|extract|informazion\w*|dettagli)\b", t):
+                extract_port([path])
+                return True
+        return False
+    return jv_folder_q(orig, t, path, True)                 # an explicit folder
+
+
+def jv_deep(orig, t, sel):
+    """Entry point of the deep layer; never lets an unexpected error kill the shell."""
+    try:
+        return _jv_deep(orig, t, sel)
+    except KeyboardInterrupt:
+        out()
+        jarvis_say("Stopped, sir.")
+        return True
+    except Exception as e:
+        jarvis_say(f"I ran into trouble with that, sir: {safe(e)}")
+        return True
 
 
 def jarvis_interpret(texto):
@@ -1626,6 +3350,9 @@ def jarvis_interpret(texto):
         jarvis_say(f"{part_of_day()}, sir. At your service.")
         jarvis_status("Current status")
         return True
+
+    if jv_deep(orig, t, sel):          # specific questions about files/folders + opening files
+        return True
     if has("thank", "grazie"):
         jarvis_say("My pleasure, sir.")
         return True
@@ -1635,14 +3362,6 @@ def jarvis_interpret(texto):
         return True
     if has("how are you", "come stai"):
         jarvis_say("Operating at full capacity, sir. Thank you for asking.")
-        return True
-    if has("maintenance", "manutenzione", "update yourself", "self-update", "self update",
-           "aggiornati", "autoaggiorn", "check for updates", "controlla aggiornamenti"):
-        ack("Running maintenance: health check and pending updates.")
-        esegui("maintenance")
-        return True
-    if re.match(r"(implement\s+jarvis|improve|evolve|migliora)\b", t):
-        esegui(orig)
         return True
     if has("status", "stato"):
         jarvis_status()
@@ -1656,22 +3375,6 @@ def jarvis_interpret(texto):
         return True
     if has("clear", "pulisci", "cls"):
         esegui("Clear-Host")
-        return True
-
-    m = re.match(r"(?:please\s+)?(?:select|choose|pick|use|seleziona|scegli|open|apri)\s+"
-                 r"(?:the\s+|il\s+)?(?:file\s+)?[\"']?(.+?)[\"']?$", orig, re.I)
-    if m:
-        cand = m.group(1).strip()
-        try:
-            names = os.listdir(".")
-        except OSError:
-            names = []
-        match = next((n for n in names if n.lower() == cand.lower()), None) or (cand if os.path.exists(cand) else None)
-        if match is None:
-            jarvis_say(f"I can't find '{safe(cand)}' in this folder, sir. Say 'list' to see what is here.")
-        else:
-            ack()
-            esegui(f'cd "{match}"')
         return True
 
     if has("game", "gioc", "data.win", "gamemaker", "undertale", "deltarune", "steam"):
@@ -1733,853 +3436,18 @@ def jarvis_interpret(texto):
   jarvis scan this PC for corrupt files
   jarvis select data.win        then:  jarvis tell me about it / what's inside / how much battery
   jarvis status
+  jarvis open data.win          opens it read-only (also: open the 2nd one, open undertale, read notes.txt, go up)
+  jarvis how many lines / first 20 lines / search for "word" / sha256 / is it corrupt
+  jarvis what game is this / how many sprites / list the chunks      (for a GameMaker data.win)
+  jarvis which columns / which tables / how many pages / is it 64-bit / what is inside
+  jarvis biggest files / find all png files / duplicates / modified today / free disk space
+  jarvis examples               shows everything I can answer
 (You can also skip the word 'jarvis': just type the request.)""")
 def jarvis_cmd(args):
     """Talk to JARVIS in plain language, e.g.  jarvis find my games"""
     if not jarvis_interpret(" ".join(args)):
         jarvis_say("I'm afraid I didn't catch that, sir. Try 'find my games', 'scan this PC', "
-                   "'select <file>' or 'help'.")
-
-
-# ======================= SELF-UPDATE (maintenance + implement jarvis) =======================
-# The ONLY code allowed to touch the disk or start processes lives in the functions listed in
-# WRITER_FUNCS / PROC_FUNCS below. Every candidate update is checked by the static rules
-# (rule_violations) and run through a self-test BEFORE it can replace this file. These checks are
-# guardrails against mistakes, not a sandbox: only install updates you trust.
-__version__ = "1.3.0"
-
-APP_PATH = os.path.abspath(__file__)
-APP_DIR = os.path.dirname(APP_PATH)
-UPD_DIR = os.path.join(APP_DIR, "updates")
-BAK_DIR = os.path.join(APP_DIR, "backups")
-MAX_UPDATE = 5 * 1024 * 1024
-CONFIRM_SECONDS = 10
-SELFTEST_TIMEOUT = 30
-
-REQUIRED_FUNCS = {"main", "esegui", "cmdlet", "jarvis_interpret", "static_checks", "rule_violations",
-                  "validate_update", "apply_update", "restore_backup", "jarvis_implement",
-                  "reject_and_respawn", "selftest", "ask_model", "list_models", "core_fingerprint"}
-REQUIRED_CMDLETS = {"extract.port", "interact.port", "denux.hunter", "undersopic.key", "pluton.key",
-                    "Jarvis", "Implement", "Maintenance", "Improve", "Get-Help", "Exit"}
-# The only network access JARVIS has: two functions talking to the local Ollama server on THIS
-# computer (loopback). No internet address is allowed. Generated code cannot add others.
-NET_FUNCS = {"ask_model", "list_models", "_local_opener"}
-NET_ROOTS = {"urllib", "ssl", "http"}
-OLLAMA = "http://127.0.0.1:11434"
-ALLOWED_URLS = {"http://127.0.0.1:11434", "http://127.0.0.1:11434/api/chat", "http://127.0.0.1:11434/api/tags", "https://aka.ms/PSWindows"}
-DUNDER_BAD = {"__dict__", "__globals__", "__builtins__", "__subclasses__", "__bases__", "__mro__", "__code__"}
-# The safety core: a generated patch may never change these (only 'implement jarvis -Core', typed by you).
-PROTECTED_NAMES = {"BANNED_IMPORTS", "BANNED_CALLS", "BANNED_PAIRS", "FS_MUTATORS", "FS_ATTRS", "PROC_OS",
-                   "GUARDED_ROOTS", "WRITER_FUNCS", "PROC_FUNCS", "NET_FUNCS", "NET_ROOTS", "ALLOWED_URLS",
-                   "DUNDER_BAD", "REQUIRED_FUNCS", "REQUIRED_CMDLETS", "PROTECTED_NAMES", "PROTECTED_DEFS",
-                   "MAX_UPDATE", "CONFIRM_SECONDS", "APP_PATH", "UPD_DIR", "BAK_DIR", "SANDBOX_BOOT", "OLLAMA"}
-PROTECTED_DEFS = {"_RuleVisitor", "rule_violations", "_declared_version", "static_checks", "core_fingerprint",
-                  "selftest_candidate", "validate_update", "write_atomic", "inside_updates", "archive_candidate",
-                  "discard_candidate", "restore_backup", "apply_update", "restart_same_window", "respawn_window",
-                  "ask_timeout", "reject_and_respawn", "jarvis_implement", "implement_cmd", "ask_model", "list_models", "_local_opener",
-                  "file_sha", "ver_tuple", "selftest"}
-BANNED_IMPORTS = {"socket", "urllib", "urllib2", "http", "ftplib", "smtplib", "telnetlib", "requests",
-                  "xmlrpc", "ssl", "webbrowser", "pickle", "marshal", "importlib", "imp", "builtins"}
-BANNED_CALLS = {"eval", "exec", "compile", "__import__"}
-BANNED_PAIRS = {("os", "system"), ("os", "popen"), ("os", "startfile"), ("shutil", "rmtree")}
-FS_MUTATORS = {("os", "remove"), ("os", "unlink"), ("os", "rmdir"), ("os", "removedirs"),
-               ("os", "replace"), ("os", "rename"), ("os", "makedirs"), ("os", "mkdir"),
-               ("os", "chmod"), ("os", "truncate"), ("shutil", "copy"), ("shutil", "copy2"),
-               ("shutil", "copyfile"), ("shutil", "move"), ("shutil", "copytree")}
-FS_ATTRS = {"unlink", "write_text", "write_bytes", "rmdir", "touch", "mkdir", "rename"}
-PROC_OS = {"_exit", "execv", "execl", "execvp", "execlp", "spawnl", "spawnv"}
-GUARDED_ROOTS = {"os", "shutil", "subprocess"}
-WRITER_FUNCS = {"write_atomic", "apply_update", "restore_backup", "archive_candidate",
-                "discard_candidate", "prepare_candidate", "selftest_candidate", "save_candidate"}
-PROC_FUNCS = {"battery_info", "selftest_candidate", "respawn_window", "restart_same_window"}
-
-
-def file_sha(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest().upper()
-
-
-def ver_tuple(s):
-    return tuple(int(x) for x in s.split("."))
-
-
-class _RuleVisitor(ast.NodeVisitor):
-    """Collects every construct a JARVIS update is not allowed to contain."""
-
-    def __init__(self):
-        self.bad, self.stack = [], []
-
-    def where(self):
-        return self.stack[0] if self.stack else "<module>"
-
-    def add(self, node, why):
-        self.bad.append(f"line {getattr(node, 'lineno', '?')}: {why}")
-
-    def visit_FunctionDef(self, node):
-        self.stack.append(node.name)
-        self.generic_visit(node)
-        self.stack.pop()
-
-    visit_AsyncFunctionDef = visit_FunctionDef
-
-    def visit_Import(self, node):
-        for a in node.names:
-            root = a.name.split(".")[0]
-            if root in BANNED_IMPORTS and not (root in NET_ROOTS and self.where() in NET_FUNCS):
-                self.add(node, f"forbidden module '{root}'")
-            if root in GUARDED_ROOTS and a.asname:
-                self.add(node, f"aliased import of '{root}'")
-
-    def visit_ImportFrom(self, node):
-        root = (node.module or "").split(".")[0]
-        if root in BANNED_IMPORTS and not (root in NET_ROOTS and self.where() in NET_FUNCS):
-            self.add(node, f"forbidden module '{root}'")
-        elif root in GUARDED_ROOTS:
-            self.add(node, f"'from {root} import ...' is not allowed (use {root}.name)")
-
-    def visit_Constant(self, node):
-        if isinstance(node.value, str):
-            for u in re.findall(r"https?://[^\s\"'<>)]+", node.value):
-                if u.rstrip(".,;") not in ALLOWED_URLS:
-                    self.add(node, f"web address not on the allowlist: {u[:60]}")
-
-    def visit_Attribute(self, node):
-        if node.attr in DUNDER_BAD:
-            self.add(node, f"access to {node.attr}")
-        self.generic_visit(node)
-
-    def visit_Name(self, node):
-        if node.id == "__builtins__":
-            self.add(node, "access to __builtins__")
-
-    def visit_Call(self, node):
-        f, where = node.func, self.where()
-        if isinstance(f, ast.Name):
-            if f.id in BANNED_CALLS or f.id in ("globals", "vars", "locals"):
-                self.add(node, f"call to {f.id}()")
-            elif (f.id in ("getattr", "setattr", "delattr", "hasattr") and node.args
-                  and isinstance(node.args[0], ast.Name) and node.args[0].id in GUARDED_ROOTS | {"sys", "builtins"}):
-                self.add(node, f"{f.id}() on module '{node.args[0].id}'")
-            elif f.id == "open":
-                mode = node.args[1] if len(node.args) > 1 else next(
-                    (k.value for k in node.keywords if k.arg == "mode"), None)
-                if mode is not None and where not in WRITER_FUNCS:
-                    if not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)):
-                        self.add(node, "open() with a non-literal mode outside the update machinery")
-                    elif any(c in mode.value for c in "wax+"):
-                        self.add(node, f"open() for writing in '{where}'")
-        elif isinstance(f, ast.Attribute):
-            base = f.value.id if isinstance(f.value, ast.Name) else None
-            pair = (base, f.attr)
-            if pair in BANNED_PAIRS:
-                quiet = (pair == ("os", "system") and where == "main" and len(node.args) == 1
-                         and isinstance(node.args[0], ast.Constant) and node.args[0].value == "")
-                if not quiet:
-                    self.add(node, f"forbidden call {base}.{f.attr}()")
-            elif (pair in FS_MUTATORS or f.attr in FS_ATTRS) and where not in WRITER_FUNCS:
-                self.add(node, f"file modification '{f.attr}' in '{where}' (read-only code)")
-            elif (base == "subprocess" or (base == "os" and f.attr in PROC_OS)) and where not in PROC_FUNCS:
-                self.add(node, f"process control '{base}.{f.attr}' in '{where}'")
-        self.generic_visit(node)
-
-
-def rule_violations(tree):
-    v = _RuleVisitor()
-    v.visit(tree)
-    return v.bad
-
-
-def _declared_version(tree):
-    for n in tree.body:
-        if (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
-                and n.targets[0].id == "__version__" and isinstance(n.value, ast.Constant)
-                and isinstance(n.value.value, str) and re.fullmatch(r"\d+(\.\d+){1,3}", n.value.value)):
-            return n.value.value
-    return None
-
-
-def core_fingerprint(tree):
-    """{name: structure} of every protected constant/function/class, independent of line numbers."""
-    fp = {}
-    for n in tree.body:
-        if isinstance(n, ast.Assign):
-            for t in n.targets:
-                if isinstance(t, ast.Name) and t.id in PROTECTED_NAMES:
-                    fp[t.id] = ast.dump(n.value)
-        elif isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in PROTECTED_DEFS:
-            fp[n.name] = ast.dump(n)
-    return fp
-
-
-def static_checks(path, current_version=None, baseline=None, allow_core=False):
-    """Phases 1-5 (nothing is executed). Returns [(phase, ok, detail)]."""
-    res = []
-    try:
-        size = os.path.getsize(path)
-        if size == 0 or size > MAX_UPDATE:
-            return [("File", False, f"size {human(size)} is not acceptable (max {human(MAX_UPDATE)})")]
-        with open(path, "rb") as f:
-            src = f.read().decode("utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        return [("File", False, f"cannot read it as UTF-8 text ({safe(e)})")]
-    res.append(("File", True, f"{human(size)}, UTF-8 text"))
-    try:
-        tree = ast.parse(src, filename=os.path.basename(path))
-    except (SyntaxError, ValueError, RecursionError) as e:
-        res.append(("Syntax", False, safe(e)))
-        return res
-    res.append(("Syntax", True, "valid Python"))
-
-    ver = _declared_version(tree)
-    if ver is None:
-        res.append(("Version", False, 'must declare  __version__ = "X.Y.Z"'))
-    elif current_version and ver_tuple(ver) <= ver_tuple(current_version):
-        res.append(("Version", False, f"{ver} is not newer than the installed {current_version}"))
-    else:
-        res.append(("Version", True, ver + (f" (installed: {current_version})" if current_version else "")))
-
-    funcs = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    cmds = set()
-    for n in tree.body:
-        if isinstance(n, ast.FunctionDef):
-            for d in n.decorator_list:
-                if (isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == "cmdlet"
-                        and d.args and isinstance(d.args[0], ast.Constant)):
-                    cmds.add(d.args[0].value)
-    guard = any(isinstance(n, ast.If) and isinstance(n.test, ast.Compare)
-                and isinstance(n.test.left, ast.Name) and n.test.left.id == "__name__" for n in tree.body)
-    missing = sorted(REQUIRED_FUNCS - funcs) + sorted("command " + c for c in REQUIRED_CMDLETS - cmds)
-    if not guard:
-        missing.append("the __main__ guard")
-    res.append(("Structure", not missing,
-                "all core functions, commands and safeguards are present" if not missing
-                else "missing: " + ", ".join(missing)))
-
-    if baseline and not allow_core:
-        try:
-            with open(baseline, "rb") as f:
-                old_fp = core_fingerprint(ast.parse(f.read()))
-            new_fp = core_fingerprint(tree)
-            changed = sorted(k for k in old_fp if new_fp.get(k) != old_fp[k])
-            res.append(("Safety core", not changed,
-                        "the validation/backup/update machinery is unchanged" if not changed
-                        else "it changes the protected safety core: " + ", ".join(changed[:8])))
-        except (OSError, SyntaxError, ValueError) as e:
-            res.append(("Safety core", False, f"cannot compare with the installed version ({safe(e)})"))
-
-    bad = rule_violations(tree)
-    res.append(("Safety rules", not bad,
-                "no forbidden code" if not bad
-                else f"{len(bad)} violation(s):\n" + "\n".join(bad[:8]) + ("\n..." if len(bad) > 8 else "")))
-    return res
-
-
-SANDBOX_BOOT = r"""
-import os, sys, runpy
-tmp, script = os.path.realpath(sys.argv[1]), sys.argv[2]
-W = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
-BLOCK = ("socket.", "subprocess.", "os.system", "os.exec", "os.spawn", "os.fork", "os.posix_spawn",
-         "os.remove", "os.rename", "os.rmdir", "os.mkdir", "os.chmod", "os.truncate", "os.symlink",
-         "os.link", "shutil.", "ctypes.", "winreg.", "webbrowser.", "urllib.", "http.", "ftplib.", "smtplib.")
-def hook(event, args):
-    if event.startswith(BLOCK):
-        raise PermissionError("sandbox: blocked " + event)
-    if event == "open" and len(args) >= 3:
-        path, mode, flags = args[0], args[1], args[2]
-        writing = (isinstance(mode, str) and any(c in mode for c in "wax+")) or (isinstance(flags, int) and flags & W)
-        if writing and isinstance(path, (str, bytes, os.PathLike)):
-            p = os.path.realpath(os.fsdecode(path))
-            if p != os.path.realpath(os.devnull) and not p.startswith(tmp + os.sep):
-                raise PermissionError("sandbox: blocked write to " + p)
-sys.addaudithook(hook)
-try:
-    import resource
-    resource.setrlimit(resource.RLIMIT_CPU, (20, 20))
-    resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (10 << 20, 10 << 20))
-except Exception:
-    pass
-sys.argv = [script, "--selftest"]
-runpy.run_path(script, run_name="__main__")
-"""
-
-
-def selftest_candidate(path):
-    """Last phase: run the candidate's own --selftest in a SANDBOX: throw-away folder, minimal environment,
-    CPU/memory limits and an audit hook that blocks network, other programs, deleting and writing outside it."""
-    keep = ("PATH", "SYSTEMROOT", "TEMP", "TMP", "LANG", "LC_ALL")
-    env = {k: os.environ[k] for k in keep if k in os.environ}
-    env["PYTHONIOENCODING"] = "utf-8"
-    try:
-        with tempfile.TemporaryDirectory(prefix="jarvis_selftest_") as tmp:
-            dst = os.path.join(tmp, "pwsh.py")
-            with open(path, "rb") as s, open(dst, "wb") as d:
-                d.write(s.read())
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", SANDBOX_BOOT, tmp, dst], cwd=tmp, env=env,
-                               stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=SELFTEST_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return [("Self-test", False, f"timed out after {SELFTEST_TIMEOUT} s")]
-    except OSError as e:
-        return [("Self-test", False, f"could not run it ({safe(e)})")]
-    ok = r.returncode == 0 and "SELFTEST-OK" in r.stdout
-    if ok:
-        return [("Self-test", True, "sandboxed run: the new version starts and passes its own checks")]
-    tail = (r.stderr.strip() or r.stdout.strip()).splitlines()[-4:]
-    return [("Self-test", False, safe(" | ".join(tail)) or f"exit code {r.returncode}")]
-
-
-def validate_update(path, require_newer=True, allow_core=False):
-    """All phases. The candidate is only EXECUTED (the last one) if all the others passed."""
-    phases = static_checks(path, __version__ if require_newer else None, APP_PATH, allow_core)
-    if all(p[1] for p in phases):
-        phases += selftest_candidate(path)
-    return all(p[1] for p in phases), phases
-
-
-def selftest():
-    """Run by the update validator on a candidate:  python -I pwsh.py --selftest"""
-    problems = []
-    for n in REQUIRED_CMDLETS:
-        if n.lower() not in CMDLETS:
-            problems.append(f"command {n} is not registered")
-    if tokenize('a "b c"') != ["a", "b c"]:
-        problems.append("tokenize is broken")
-    if parse(["-Force", "x"]) != ({"-force"}, ["x"]):
-        problems.append("parse is broken")
-    if _declared_version(ast.parse('__version__ = "1.0"')) != "1.0":
-        problems.append("version reader is broken")
-    # canaries: the rule checker must still catch bad code and accept clean code
-    if not rule_violations(ast.parse("import socket\nos.remove('x')\neval('1')")):
-        problems.append("rule checker no longer detects forbidden code")
-    if not rule_violations(ast.parse("x = 'ht" + "tps://evil.example/a'\ngetattr(os, 'remove')")):
-        problems.append("rule checker no longer detects stray web addresses / dynamic access")
-    if rule_violations(ast.parse("x = 1\n")):
-        problems.append("rule checker rejects harmless code")
-    try:
-        mine = static_checks(APP_PATH)
-        problems += [f"{p[0]}: {p[2]}" for p in mine if not p[1]]
-    except Exception as e:
-        problems.append(f"static checks crashed: {e}")
-    if problems:
-        print("SELFTEST-FAIL: " + "; ".join(problems))
-        return 1
-    print("SELFTEST-OK")
-    return 0
-
-
-# ---- the only functions that write files or start processes ----
-def write_atomic(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-
-def inside_updates(path):
-    p = os.path.normcase(os.path.realpath(path))
-    return p.startswith(os.path.normcase(os.path.realpath(UPD_DIR)) + os.sep)
-
-
-def archive_candidate(path, sub):
-    """Move a candidate from updates/ into updates/<sub>/ (kept, never deleted). Files elsewhere are left alone."""
-    if not inside_updates(path):
-        return None
-    folder = os.path.join(UPD_DIR, sub)
-    os.makedirs(folder, exist_ok=True)
-    dst = os.path.join(folder, datetime.now().strftime("%Y%m%d_%H%M%S_") + os.path.basename(path))
-    os.replace(path, dst)
-    return dst
-
-
-def discard_candidate(path):
-    """Delete a rejected candidate - only if it lives in updates/ (your other files are never touched)."""
-    if not inside_updates(path):
-        return False
-    os.remove(path)
-    return True
-
-
-def restore_backup(bak):
-    with open(bak, "rb") as f:
-        write_atomic(APP_PATH, f.read())
-
-
-def apply_update(src, label="update"):
-    """Back up the running version, install src, verify it, roll back on any problem. True on success."""
-    with open(src, "rb") as f:
-        new = f.read()
-    os.makedirs(BAK_DIR, exist_ok=True)
-    bak = os.path.join(BAK_DIR, f"pwsh_v{__version__}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py")
-    shutil.copy2(APP_PATH, bak)
-    if file_sha(bak) != file_sha(APP_PATH):
-        out("Backup verification failed: nothing was changed.", RED)
-        return False
-    try:
-        write_atomic(APP_PATH, new)
-        broken = [p for p in static_checks(APP_PATH) if not p[1]]
-        if broken or file_sha(APP_PATH) != hashlib.sha256(new).hexdigest().upper():
-            raise OSError("the installed file did not verify")
-    except Exception as e:
-        restore_backup(bak)
-        out(f"Install failed ({safe(e)}): the previous version was restored from the backup.", RED)
-        return False
-    out(f"Backup of the old version: {safe(bak)}", GRAY)
-    if label == "update":
-        archive_candidate(src, "applied")
-    return True
-
-
-def prepare_candidate():
-    """Create updates/pwsh_next.py = this program with the patch number raised. Returns (path, version)."""
-    os.makedirs(UPD_DIR, exist_ok=True)
-    dst = os.path.join(UPD_DIR, "pwsh_next.py")
-    if os.path.exists(dst):
-        return None
-    with open(APP_PATH, "r", encoding="utf-8", newline="") as f:
-        bumped = bump_version(f.read())
-    if not bumped:
-        return None
-    with open(dst, "w", encoding="utf-8", newline="") as f:
-        f.write(bumped[0])
-    return dst, bumped[1]
-
-
-def bump_version(src):
-    """(source with the patch number +1, new version) or None."""
-    m = re.search(r'^__version__ = "(\d+)\.(\d+)\.(\d+)"', src, re.M)
-    if not m:
-        return None
-    new = f"{m[1]}.{m[2]}.{int(m[3]) + 1}"
-    return src[:m.start()] + f'__version__ = "{new}"' + src[m.end():], new
-
-
-def save_candidate(text):
-    """Write a generated candidate into updates/ (never over an existing file). Returns its path."""
-    os.makedirs(UPD_DIR, exist_ok=True)
-    dst = os.path.join(UPD_DIR, datetime.now().strftime("pwsh_ai_%Y%m%d_%H%M%S.py"))
-    with open(dst, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
-    return dst
-
-
-def restart_same_window():
-    sys.stdout.write("\x1b[0m")
-    sys.stdout.flush()
-    if os.name == "nt":
-        os._exit(subprocess.call([sys.executable, APP_PATH]))
-    os.execv(sys.executable, [sys.executable, APP_PATH])
-
-
-def respawn_window():
-    """Open a brand-new window running JARVIS and close this one. No terminal found: restart in place."""
-    cmd, here, spawned = [sys.executable, APP_PATH], os.getcwd(), False
-    try:
-        if os.name == "nt":
-            subprocess.Popen(cmd, cwd=here, creationflags=0x00000010)      # CREATE_NEW_CONSOLE
-            spawned = True
-        elif sys.platform == "darwin":
-            line = "cd " + shlex.quote(here) + " && " + " ".join(shlex.quote(c) for c in cmd)
-            esc = line.replace("\\", "\\\\").replace('"', '\\"')
-            subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{esc}"'])
-            spawned = True
-        else:
-            for term in (["x-terminal-emulator", "-e"], ["gnome-terminal", "--"], ["konsole", "-e"],
-                         ["xfce4-terminal", "-e"], ["xterm", "-e"]):
-                if shutil.which(term[0]):
-                    subprocess.Popen(term + cmd, cwd=here)
-                    spawned = True
-                    break
-    except OSError:
-        spawned = False
-    if spawned:
-        sys.stdout.write("\x1b[0m")
-        sys.stdout.flush()
-        os._exit(0)
-    restart_same_window()
-
-
-# ---- code generation: JARVIS writes new code for himself with a FREE local model (Ollama) ----
-IMPROVE_SYSTEM = (
-    "You write Python 3 code that is added to JARVIS, a single-file shell program. "
-    "Reply with ONE python code block and nothing else. The code must define one or more NEW commands "
-    "with the @cmdlet decorator, exactly like the example. Rules: standard library only; the command must be "
-    "read-only (never write, delete, move or execute files; no subprocess, no network, no eval/exec); "
-    "print with out(text, COLOR); use parse(args) for flags; keep it under 120 lines; "
-    "use group=\"Extensions\"; do not redefine existing functions or commands.")
-IMPROVE_EXAMPLE = '''@cmdlet("Count-Lines", "cl", group="Extensions", usage="count-lines <file>")
-def count_lines(args):
-    """Count the lines of a text file"""
-    flags, pos = parse(args)
-    if not pos:
-        out("Usage: count-lines <file>", YELLOW)
-        return
-    try:
-        with open(pos[0], encoding="utf-8", errors="replace") as f:
-            n = sum(1 for _ in f)
-    except OSError as e:
-        out(f"count-lines : cannot read the file ({e.strerror})", RED)
-        return
-    out(f"{n:,} line(s) in {safe(pos[0])}", GREEN)'''
-INSERT_MARKER = "# ---------------- PARSER E" + " LOOP ----------------"   # split so it occurs once in this file
-
-
-def _local_opener():
-    import urllib.request
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))     # never go through a proxy
-
-
-def list_models():
-    """Names of the models installed in the local Ollama server, or None if it is not running."""
-    try:
-        with _local_opener().open(OLLAMA + "/api/tags", timeout=3) as r:
-            return [m.get("name", "") for m in json.loads(r.read().decode("utf-8")).get("models", [])]
-    except (OSError, ValueError):
-        return None
-
-
-def ask_model(model, system, prompt):
-    """Ask the local Ollama server (this computer only, free, no key). Returns the reply text."""
-    import urllib.request
-    body = json.dumps({"model": model, "stream": False, "options": {"temperature": 0.2, "num_predict": 3000},
-                       "messages": [{"role": "system", "content": system},
-                                    {"role": "user", "content": prompt}]}).encode("utf-8")
-    req = urllib.request.Request(OLLAMA + "/api/chat", data=body, method="POST",
-                                 headers={"content-type": "application/json"})
-    try:
-        with _local_opener().open(req, timeout=900) as r:
-            data = json.loads(r.read().decode("utf-8"))
-    except (OSError, ValueError) as e:
-        raise RuntimeError(f"the local model did not answer ({e})")
-    if data.get("done_reason") == "length":
-        raise RuntimeError("the reply was cut off (too long); ask for something smaller")
-    return (data.get("message") or {}).get("content", "")
-
-
-def extract_code(text):
-    m = re.search(r"```(?:python|py)?\s*\n(.*?)```", text, re.S)
-    code = (m.group(1) if m else text).strip("\n")
-    if "@cmdlet(" not in code:
-        raise ValueError("the reply contains no @cmdlet command")
-    if len(code.splitlines()) > 400:
-        raise ValueError("the generated code is too long")
-    return code
-
-
-def insert_code(source, code):
-    if source.count(INSERT_MARKER) != 1:
-        raise ValueError("cannot find the place where new commands are added")
-    return source.replace(INSERT_MARKER, "# ---- generated by JARVIS ----\n" + code.rstrip() + "\n\n\n" + INSERT_MARKER, 1)
-
-
-@cmdlet("Improve", "evolve", group="Assistant", usage="""improve <what you want>
-  improve a command that lists the 10 biggest files in a folder
-JARVIS asks a FREE model running on this PC (Ollama: ollama.com) to write the new command, adds it to a
-copy of himself in updates/ and validates it at once (sandboxed self-test included).
-If it breaks the safety phases the window self-destructs (type delete within 10 seconds to delete it).
-If it passes, it is only INSTALLED when you run:  implement jarvis
-Free, no account, no key, works offline: nothing leaves this computer.
-Setup (once): install Ollama, then e.g.  ollama pull qwen2.5-coder:7b   (any model you like works).
-Choose a model:  set JARVIS_MODEL=<name>   (default: the first installed one).""")
-def improve_cmd(args):
-    """JARVIS writes a new command for himself (free local model) and validates it; install with implement jarvis"""
-    _, pos = parse(args)
-    request = " ".join(pos).strip()
-    if not request:
-        out("Usage: improve <what you want JARVIS to add>", YELLOW)
-        out()
-        return
-    models = list_models()
-    if models is None:
-        jarvis_say("I cannot reach a local model, sir. Install Ollama (ollama.com), start it, pull a model "
-                   "(for example: ollama pull qwen2.5-coder:7b) and ask again. It is free and works offline.")
-        return
-    if not models:
-        jarvis_say("Ollama is running but has no model, sir. Try: ollama pull qwen2.5-coder:7b")
-        return
-    model = os.environ.get("JARVIS_MODEL", "").strip() or models[0]
-    if model not in models:
-        jarvis_say(f"The model '{safe(model)}' is not installed. Installed: {', '.join(safe(m) for m in models)}")
-        return
-    try:
-        with open(APP_PATH, "r", encoding="utf-8") as f:
-            source = f.read()
-    except OSError as e:
-        jarvis_say(f"I cannot read my own source ({safe(e)}).")
-        return
-    prompt = (f"Existing commands (do not reuse these names): {', '.join(sorted(NOMI, key=str.lower))}\n"
-              "Helpers you can call: out(text, color=None), parse(args) -> (flags, positional), safe(text), "
-              "human(num_bytes), detect_kind(path), colors YELLOW RED GREEN CYAN GRAY.\n\n"
-              f"Example of the format:\n```python\n{IMPROVE_EXAMPLE}\n```\n\nRequest: {request}")
-    ack(f"Asking the local model '{safe(model)}'. On a slow PC this can take a few minutes.")
-    try:
-        code = extract_code(ask_model(model, IMPROVE_SYSTEM, prompt))
-        bumped = bump_version(insert_code(source, code))
-        if bumped is None:
-            raise ValueError("the version line is missing")
-        new, ver = bumped
-        path = save_candidate(new)
-    except (RuntimeError, ValueError, OSError) as e:
-        jarvis_say(f"I could not produce usable code: {safe(e)}")
-        return
-    out()
-    out(f"Candidate v{ver} saved: {safe(path)}", CYAN)
-    out("  New code:", GRAY)
-    for line in code.splitlines()[:60]:
-        out("  + " + safe(line)[:150], GREEN)
-    if len(code.splitlines()) > 60:
-        out(f"  ... {len(code.splitlines()) - 60} more line(s); open the file to read them all", GRAY)
-    out()
-    ok, phases = validate_update(path)
-    show_phases(phases)
-    out()
-    if not ok:
-        reject_and_respawn(path, phases)
-        return
-    jarvis_say("The new code passed every safety phase. It is NOT installed yet. "
-               "Read it, then run  implement jarvis  to install it (the old version will be backed up).")
-    out()
-
-
-# ---- the interactive parts ----
-def ask_timeout(seconds):
-    """Read one line, but give up after `seconds`. Returns the text, or None on timeout / end of input."""
-    sys.stdout.write("> ")
-    sys.stdout.flush()
-    end = time.monotonic() + seconds
-    if os.name == "nt":
-        import msvcrt
-        buf = ""
-        while time.monotonic() < end:
-            if msvcrt.kbhit():
-                ch = msvcrt.getwche()
-                if ch in ("\r", "\n"):
-                    sys.stdout.write("\n")
-                    return buf
-                buf = buf[:-1] if ch == "\b" else buf + ch
-            else:
-                time.sleep(0.05)
-        sys.stdout.write("\n")
-        return None
-    import select
-    while True:
-        left = end - time.monotonic()
-        if left <= 0:
-            sys.stdout.write("\n")
-            return None
-        ready, _, _ = select.select([sys.stdin], [], [], left)
-        if ready:
-            line = sys.stdin.readline()
-            return line.rstrip("\r\n") if line else None
-
-
-def show_phases(phases):
-    for name, ok, detail in phases:
-        lines = detail.split("\n")
-        out(f"  [{' OK ' if ok else 'FAIL'}] {name.ljust(13)} {lines[0]}", GREEN if ok else RED)
-        for extra in lines[1:]:
-            out(" " * 22 + extra, RED)
-
-
-def pending_updates():
-    try:
-        names = [os.path.join(UPD_DIR, n) for n in os.listdir(UPD_DIR)
-                 if n.lower().endswith(".py") and os.path.isfile(os.path.join(UPD_DIR, n))]
-    except OSError:
-        return []
-    return sorted(names, key=os.path.getmtime, reverse=True)
-
-
-def list_backups():
-    try:
-        names = [os.path.join(BAK_DIR, n) for n in os.listdir(BAK_DIR)
-                 if n.startswith("pwsh_v") and n.endswith(".py")]
-    except OSError:
-        return []
-    return sorted(names, key=os.path.getmtime, reverse=True)
-
-
-def live_is_intact():
-    return all(p[1] for p in static_checks(APP_PATH))
-
-
-def reject_and_respawn(src, phases):
-    """A candidate broke the safety phases: self-destruct this window, open a fresh intact one."""
-    out()
-    out("UPDATE REJECTED: it does not respect the safety phases. The installed version was NOT touched.", RED)
-    show_phases(phases)
-    out()
-    jarvis_say("This window will now self-destruct and a fresh, intact JARVIS will open.")
-    jarvis_say(f"Type  delete  within {CONFIRM_SECONDS} seconds to also delete the rejected update; "
-               "otherwise it is kept in updates/rejected/.")
-    answer = ask_timeout(CONFIRM_SECONDS)
-    try:
-        if answer is not None and answer.strip().lower() == "delete":
-            if discard_candidate(src):
-                jarvis_say("Rejected update deleted.")
-            else:
-                jarvis_say("That file is not inside updates/, so I left it untouched.")
-        else:
-            kept = archive_candidate(src, "rejected")
-            jarvis_say("No 'delete' received: the rejected update is kept for inspection."
-                       if kept else "No 'delete' received. The file is outside updates/, left untouched.")
-    except OSError as e:
-        out(f"Could not clean up the rejected update ({safe(e)}).", YELLOW)
-    if not live_is_intact():
-        baks = list_backups()
-        if baks:
-            restore_backup(baks[0])
-            jarvis_say("The installed file looked damaged: restored from the latest backup.")
-    jarvis_say("Goodbye, sir. Back in a moment.")
-    respawn_window()
-
-
-def jarvis_implement(src=None, dry=False, allow_older=False, allow_core=False):
-    """Validate an update and, if it passes every phase, install it (old version is backed up)."""
-    if src is None:
-        found = pending_updates()
-        if not found:
-            jarvis_say("There is no update in updates/, sir. Put the new pwsh.py there "
-                       "(or run  maintenance -Prepare  for a ready-made candidate).")
-            return
-        src = found[0]
-    if not os.path.isfile(src):
-        jarvis_say(f"I can't find the update file '{safe(src)}', sir.")
-        return
-    ack(f"Validating {safe(os.path.basename(src))} before touching anything.")
-    ok, phases = validate_update(src, require_newer=not allow_older, allow_core=allow_core or allow_older)
-    out()
-    show_phases(phases)
-    out()
-    if not ok:
-        if dry or allow_older:
-            jarvis_say("That file does not pass the safety phases, sir. Nothing was changed.")
-            return
-        reject_and_respawn(src, phases)
-        return
-    if dry:
-        jarvis_say("All phases passed. Dry run: nothing was installed.")
-        return
-    if os.path.normcase(os.path.realpath(src)) == os.path.normcase(APP_PATH) or file_sha(src) == file_sha(APP_PATH):
-        jarvis_say("That is identical to the running version, sir. Nothing to do.")
-        return
-    jarvis_say("All phases passed. Installing, with a copy of the old version.")
-    if apply_update(src, "rollback" if allow_older else "update"):
-        jarvis_say("Update installed and verified. Restarting with the new version...")
-        out()
-        restart_same_window()
-
-
-@cmdlet("Implement", group="Assistant", usage="""implement jarvis                  validate the newest file in updates/ and install it if every phase passes
-implement jarvis <file>           same, for a specific file
-implement jarvis -DryRun          only validate, install nothing
-implement jarvis -Rollback        go back to the latest backup in backups/
-implement jarvis -Core            also allow changes to the safety machinery (you must type I ACCEPT)
-Phases: file, syntax, version (must be newer), structure, safety core, safety rules, self-test.
-If an update fails them, the window self-destructs and a fresh intact one opens
-(type delete within 10 seconds to also delete the rejected file).
-A copy of the old version is always kept in backups/.""")
-def implement_cmd(args):
-    """Install a JARVIS update after validating it (keeps a backup of the old version)"""
-    flags, pos = parse(args)
-    if not pos or pos[0].lower() != "jarvis":
-        out("Usage: implement jarvis [file] [-DryRun | -Rollback]", YELLOW)
-        out()
-        return
-    if "-rollback" in flags:
-        baks = list_backups()
-        if not baks:
-            jarvis_say("There is no backup to roll back to, sir.")
-            return
-        jarvis_implement(baks[0], allow_older=True)
-        return
-    core = False
-    if "-core" in flags:
-        jarvis_say("-Core lets this update change the safety machinery itself. Only do it for code you wrote or reviewed.")
-        core = input("Type  I ACCEPT  to continue: ").strip() == "I ACCEPT"
-        if not core:
-            jarvis_say("Not confirmed, sir. Nothing was changed.")
-            return
-    src = " ".join(pos[1:]) if len(pos) > 1 else None
-    if src and not os.path.exists(src) and os.path.exists(os.path.join(UPD_DIR, src)):
-        src = os.path.join(UPD_DIR, src)
-    jarvis_implement(src, dry="-dryrun" in flags, allow_core=core)
-
-
-@cmdlet("Maintenance", "update-jarvis", group="Assistant", usage="""maintenance             health check of JARVIS itself, extensions, backups and pending updates
-maintenance -Prepare    create updates/pwsh_next.py (this program, patch number +1) to edit and then install
-(maintenance never installs anything: use  implement jarvis )""")
-def maintenance_cmd(args):
-    """JARVIS self-check: health, real system data, backups and pending updates"""
-    flags, _ = parse(args)
-    if "-prepare" in flags:
-        made = prepare_candidate()
-        if made:
-            jarvis_say(f"Candidate created: {safe(made[0])}  (version {made[1]}). Edit it, then run  implement jarvis.")
-        else:
-            jarvis_say("I could not create updates/pwsh_next.py (it already exists, or the version line is missing).")
-        return
-    out()
-    out(f"JARVIS v{__version__}", CYAN)
-    out(f"  {safe(APP_PATH)}", GRAY)
-    try:
-        out(f"  SHA256 {file_sha(APP_PATH)}", GRAY)
-    except OSError:
-        pass
-    out()
-    out("HEALTH OF THE INSTALLED FILE", YELLOW)
-    show_phases(static_checks(APP_PATH))
-    out()
-    ext = os.path.join(APP_DIR, "ext")
-    if os.path.isdir(ext):
-        out("EXTENSIONS (ext/)", YELLOW)
-        for n in sorted(os.listdir(ext)):
-            if n.endswith(".py") and not n.startswith("_"):
-                try:
-                    with open(os.path.join(ext, n), "rb") as f:
-                        ast.parse(f.read())
-                    out(f"  [ OK ] {safe(n)}", GREEN)
-                except (OSError, SyntaxError, ValueError) as e:
-                    out(f"  [FAIL] {safe(n)}: {safe(e)}", RED)
-        out()
-    out("SYSTEM (real data)", YELLOW)
-    jarvis_status("Right now")
-    try:
-        du = shutil.disk_usage(APP_DIR)
-        out(f"  Disk with JARVIS      : {human(du.free)} free of {human(du.total)}")
-    except OSError:
-        pass
-    try:
-        import psutil  # noqa: F401
-        out("  psutil                : installed (live memory/CPU available)")
-    except ImportError:
-        out("  psutil                : not installed (pip install psutil for live memory/CPU)", GRAY)
-    out(f"  Python                : {sys.version.split()[0]}")
-    models = list_models()
-    out("  Local model (Ollama)  : " + ("not running (needed only for: improve)" if models is None
-                                        else f"{len(models)} model(s) installed, improve is available"
-                                        if models else "running, but no model installed"))
-    out()
-    baks = list_backups()
-    out("BACKUPS", YELLOW)
-    out(f"  {len(baks)} backup(s)" + (f", latest: {safe(os.path.basename(baks[0]))}" if baks else ""))
-    out()
-    pend = pending_updates()
-    out("PENDING UPDATES (updates/)", YELLOW)
-    if not pend:
-        out("  none")
-    for p in pend:
-        ok, phases = validate_update(p)
-        out(f"  {safe(os.path.basename(p))}: " + ("READY - run  implement jarvis" if ok else "would be REJECTED"),
-            GREEN if ok else RED)
-        if not ok:
-            show_phases([x for x in phases if not x[1]])
-    out()
+                   "'open <file>', 'examples' or 'help'.")
 
 
 # ---------------- PARSER E LOOP ----------------
@@ -2664,8 +3532,6 @@ def prompt():
 
 
 def main():
-    if "--selftest" in sys.argv[1:]:
-        raise SystemExit(selftest())
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
