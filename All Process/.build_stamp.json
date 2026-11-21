@@ -1,5 +1,5 @@
 {
- "sha": "7f925fb909582adb2395d0598fdff31b6d829725b81fe5b2e3a4930611f24ba3",
+ "sha": "62f179628f9dc575bb5bd2c61310f6f5fdbd4f141d3b778d7425e1bf541129be",
  "parts": [
   "01_core.py",
   "02_basic_cmdlets_helpers.py",
@@ -50,5 +50,5 @@
   "20_voice.py": "# ---------------- VOICE (optional): JARVIS speaks only when you ask ----------------",
   "21_parser_logo_main.py": "# ---------------- PARSER E LOOP ----------------"
  },
- "synced": "2026-11-21 23:04:20"
+ "synced": "2026-11-21 23:04:21"
 }

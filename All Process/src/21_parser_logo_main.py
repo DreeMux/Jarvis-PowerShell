@@ -221,12 +221,25 @@ def prompt():
 # ---------------- START-UP LOGO: the spinning globe with J.A.R.V.I.S. fixed underneath ----------------
 # Same globe as 'jarvis be online' (jv_globe_rows). It only plays on a real terminal, so the start test of an
 # update (which reads the output through a pipe) sees nothing new and the start speed is not affected.
-def jv_logo_lines(R, cols, angle, scan=-1):
+def jv_logo_bar(progress, cols, width=24):
+    """The small loading bar under the title:  [██████░░░░░░░░░░░░░░░░░░]  42%   (progress 0..1)"""
+    p = max(0.0, min(1.0, progress))
+    full = int(round(width * p))
+    cells = [("[", 0.5)] + [("\u2588", 0.95)] * full + [("\u2591", 0.3)] * (width - full) + [("]", 0.5)]
+    cells += [(c, 0.75) for c in f" {int(round(p * 100)):3d}%"]
+    pad = [(" ", 0.0)] * max(0, (cols - len(cells)) // 2)
+    return jv_paint(pad + cells, "cyan")
+
+
+def jv_logo_lines(R, cols, angle, scan=-1, progress=None):
     pad = [(" ", 0.0)] * max(0, (cols - (4 * R + 1)) // 2)
     lines = [jv_paint(pad + row, "cyan") for row in jv_globe_rows(R, angle, scan)]
     title = "J.A.R.V.I.S."
     lines.append("")
     lines.append(jv_paint([(c, 0.95) for c in " " * max(0, (cols - len(title)) // 2) + title], "cyan"))
+    if progress is not None:                                    # start-up only: a loading bar under the title
+        lines.append("")
+        lines.append(jv_logo_bar(progress, cols))
     return lines
 
 
@@ -252,14 +265,14 @@ def jv_logo_show():
         out("J.A.R.V.I.S.", CYAN)
         out()
         return
-    Rb = max(Rs, min((rows - 6) // 2, (cols - 6) // 4, 11))
-    total = 2 * Rb + 1 + 2                                      # globe rows + blank + title
+    Rb = max(Rs, min((rows - 8) // 2, (cols - 6) // 4, 11))
+    total = 2 * Rb + 1 + 2 + 2                                  # globe rows + blank + title + blank + loading bar
     pad0 = max(0, (rows - 1 - total) // 2)
     screen = pad0 + total
     state = {"first": True}
 
-    def draw(R, pad, angle, scan=-1):
-        lines = [""] * pad + jv_logo_lines(R, cols, angle, scan)
+    def draw(R, pad, angle, scan=-1, progress=None):
+        lines = [""] * pad + jv_logo_lines(R, cols, angle, scan, progress)
         lines += [""] * (screen - len(lines))
         if not state["first"]:
             sys.stdout.write("\x1b[%dA" % screen)
@@ -273,14 +286,14 @@ def jv_logo_show():
         try:
             spin = 34
             for i in range(spin):                               # 1) full screen, the globe spins in the middle
-                draw(Rb, pad0, angle, scan=i % (2 * Rb + 1))
+                draw(Rb, pad0, angle, scan=i % (2 * Rb + 1), progress=0.7 * (i + 1) / spin)
                 angle += 0.07 + 0.2 * (1 - i / spin)
                 time.sleep(0.05)
             steps = 22
             for i in range(1, steps + 1):                       # 2) it shrinks and rises to the top
                 t = i / steps
                 t = t * t * (3 - 2 * t)
-                draw(round(Rb + (Rs - Rb) * t), round(pad0 * (1 - t)), angle)
+                draw(round(Rb + (Rs - Rb) * t), round(pad0 * (1 - t)), angle, progress=0.7 + 0.3 * i / steps)
                 angle += 0.06
                 time.sleep(0.04)
         except KeyboardInterrupt:

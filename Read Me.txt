@@ -1,4 +1,4 @@
-JARVIS POWERSHELL  -  modular version 3.3.0 (Screen Watch + Claude Code bridge)
+JARVIS POWERSHELL  -  modular version 3.3.1 (Screen Watch + Claude Code bridge)
 Author: DreeMux
 License: GNU GPL v3 or later (see LICENSE and NOTICE)
 
@@ -54,9 +54,11 @@ NOTES:
     folder, so that the guard points to the new files.
 
 WHAT'S NEW IN THIS VERSION
-  - New start.bat with a start screen and menu (Install Guard / Delete Guard / Proceed / Exit).
-  - Cleaner folder: everything except start.bat and this file is inside All Process\.
-  - Same program as 3.2.0 inside.
+  - New start-up animation with a loading bar.
+  - New command: claude /login (sign in to Claude Code without leaving Jarvis).
+
+JARVIS START-UP (new in 3.3.1):  the ASCII world spins, then shrinks; under the J.A.R.V.I.S. title a small loading bar
+  fills up to 100% during the animation.
 
 SCREEN WATCH (Windows only):  "watch" tells you when someone may be looking at your screen
   (RDP, VNC, TeamViewer, Zoom and similar). It only READS what Windows reports (sessions, connections, processes,
@@ -95,7 +97,9 @@ CLAUDE CODE BRIDGE (new in 3.2.0):  when you talk to Jarvis and the request is n
   leaves your computer (it goes to Anthropic's servers). Everything else in Jarvis works locally.
   To switch it off, type:   claude off        (and  claude on  to switch it back on)
   You need Claude Code installed and signed in with your own account: it is a separate product with its own terms.
-  Commands:  claude <question>  |  claude status  |  claude on  |  claude off  |  claude model <name>
+  Commands:  claude <question>  |  claude status  |  claude on  |  claude off  |  claude model <name>  |  claude /login
+  claude /login  opens Claude Code's own login in this same window (your browser opens). When the login is done,
+  leave Claude Code with /exit (or Ctrl+C) and you are back in Jarvis.
   "jarvis <question>" does it by itself when the local rules cannot answer.
   IMPLEMENT and HACK never go through the bridge: they keep their own functions.
   The voice stays off at start-up: to hear the answers say  voice on.

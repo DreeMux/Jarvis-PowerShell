@@ -10,7 +10,7 @@
 #   * 'implement' and 'hack' never pass through here: they keep their own functions;
 #   * Jarvis' own self-tests never start Claude Code (maintenance, hack yourself, update start test).
 #
-# Commands:   claude <question> | claude status | claude on | claude off | claude model <name>
+# Commands:   claude <question> | claude status | claude on | claude off | claude model <name> | claude /login
 # Plain 'jarvis <question>' that Jarvis cannot answer locally does the same automatically.
 
 import shlex
@@ -207,7 +207,43 @@ def jv_claude_status():
     out(f"  model   : {safe(JV_CLAUDE['model']) if JV_CLAUDE['model'] else 'Claude Code default (this model)'}", GRAY)
     out("  tools   : disabled (text answers only; nothing is read, changed or run)", GRAY)
     out("  routing : unknown requests go to Claude Code and are answered as JARVIS", GRAY)
-    out("  usage   : claude <question>  |  claude on  |  claude off  |  claude status  |  claude model <name>", GRAY)
+    out("  usage   : claude <question>  |  claude on  |  claude off  |  claude status  |  claude model <name>  |  claude /login", GRAY)
+    out()
+
+
+def jv_claude_login():
+    """'claude /login': opens Claude Code's own login here, in this window (it needs a real, visible terminal:
+    it opens the browser and may ask for a code). When you leave it (/exit or Ctrl+C) you are back in Jarvis."""
+    if jv_claude_test_mode():
+        return
+    exe = jv_claude_exe()
+    if not exe:
+        jarvis_say("I can't reach Claude Code, sir: the 'claude' command is not on PATH.")
+        out()
+        return
+    jarvis_say("Opening the Claude Code login, sir. Follow the steps in the browser; when it says you are logged in, "
+               "leave it with /exit (or Ctrl+C) and you are back with me.")
+    out()
+    sys.stdout.write("\x1b[0m")
+    sys.stdout.flush()
+    code = None
+    while code is None:
+        try:
+            code = subprocess.call([exe, "/login"])
+        except KeyboardInterrupt:
+            code = 0
+        except OSError as e:
+            sys.stdout.write(TEXT)
+            jarvis_say(f"I could not start Claude Code, sir: {safe(str(getattr(e, 'strerror', '') or e))}.")
+            out()
+            return
+    sys.stdout.write(BG + TEXT)
+    sys.stdout.flush()
+    out()
+    if code:
+        jarvis_say(f"Claude Code closed with code {code}, sir. If the login did not finish, say 'claude /login' to try again.")
+    else:
+        jarvis_say("Back with you, sir. Say 'claude status' or just ask me something to try the bridge.")
     out()
 
 
@@ -220,6 +256,7 @@ def jv_claude_set(auto):
 claude status             is the bridge on, which command and model it uses
 claude on | off           auto-answer unknown questions through Claude Code (default: on)
 claude model <name>       use a specific model for this session (set JARVIS_CLAUDE_MODEL to keep it)
+claude /login             log in to Claude Code (opens its login here; leave it with /exit to come back)
 Only the installed Claude Code CLI is used: no other model or provider, and tools are disabled.
 'jarvis <question>' does the same automatically when the local rules cannot answer.
 'implement' and 'hack' never go through the bridge.""")
@@ -234,6 +271,9 @@ def jv_claude_cmd(args):
         return
     if word in ("off", "disable", "disabled", "disattiva", "stop"):
         jv_claude_set(False)
+        return
+    if word in ("/login", "login", "accedi"):
+        jv_claude_login()
         return
     if word in ("model", "modello"):
         name = pos[1].strip() if len(pos) > 1 else ""

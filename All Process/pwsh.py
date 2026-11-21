@@ -9105,7 +9105,7 @@ def jv_launch_try(rest):
 #   * 'implement' and 'hack' never pass through here: they keep their own functions;
 #   * Jarvis' own self-tests never start Claude Code (maintenance, hack yourself, update start test).
 #
-# Commands:   claude <question> | claude status | claude on | claude off | claude model <name>
+# Commands:   claude <question> | claude status | claude on | claude off | claude model <name> | claude /login
 # Plain 'jarvis <question>' that Jarvis cannot answer locally does the same automatically.
 
 import shlex
@@ -9302,7 +9302,43 @@ def jv_claude_status():
     out(f"  model   : {safe(JV_CLAUDE['model']) if JV_CLAUDE['model'] else 'Claude Code default (this model)'}", GRAY)
     out("  tools   : disabled (text answers only; nothing is read, changed or run)", GRAY)
     out("  routing : unknown requests go to Claude Code and are answered as JARVIS", GRAY)
-    out("  usage   : claude <question>  |  claude on  |  claude off  |  claude status  |  claude model <name>", GRAY)
+    out("  usage   : claude <question>  |  claude on  |  claude off  |  claude status  |  claude model <name>  |  claude /login", GRAY)
+    out()
+
+
+def jv_claude_login():
+    """'claude /login': opens Claude Code's own login here, in this window (it needs a real, visible terminal:
+    it opens the browser and may ask for a code). When you leave it (/exit or Ctrl+C) you are back in Jarvis."""
+    if jv_claude_test_mode():
+        return
+    exe = jv_claude_exe()
+    if not exe:
+        jarvis_say("I can't reach Claude Code, sir: the 'claude' command is not on PATH.")
+        out()
+        return
+    jarvis_say("Opening the Claude Code login, sir. Follow the steps in the browser; when it says you are logged in, "
+               "leave it with /exit (or Ctrl+C) and you are back with me.")
+    out()
+    sys.stdout.write("\x1b[0m")
+    sys.stdout.flush()
+    code = None
+    while code is None:
+        try:
+            code = subprocess.call([exe, "/login"])
+        except KeyboardInterrupt:
+            code = 0
+        except OSError as e:
+            sys.stdout.write(TEXT)
+            jarvis_say(f"I could not start Claude Code, sir: {safe(str(getattr(e, 'strerror', '') or e))}.")
+            out()
+            return
+    sys.stdout.write(BG + TEXT)
+    sys.stdout.flush()
+    out()
+    if code:
+        jarvis_say(f"Claude Code closed with code {code}, sir. If the login did not finish, say 'claude /login' to try again.")
+    else:
+        jarvis_say("Back with you, sir. Say 'claude status' or just ask me something to try the bridge.")
     out()
 
 
@@ -9315,6 +9351,7 @@ def jv_claude_set(auto):
 claude status             is the bridge on, which command and model it uses
 claude on | off           auto-answer unknown questions through Claude Code (default: on)
 claude model <name>       use a specific model for this session (set JARVIS_CLAUDE_MODEL to keep it)
+claude /login             log in to Claude Code (opens its login here; leave it with /exit to come back)
 Only the installed Claude Code CLI is used: no other model or provider, and tools are disabled.
 'jarvis <question>' does the same automatically when the local rules cannot answer.
 'implement' and 'hack' never go through the bridge.""")
@@ -9329,6 +9366,9 @@ def jv_claude_cmd(args):
         return
     if word in ("off", "disable", "disabled", "disattiva", "stop"):
         jv_claude_set(False)
+        return
+    if word in ("/login", "login", "accedi"):
+        jv_claude_login()
         return
     if word in ("model", "modello"):
         name = pos[1].strip() if len(pos) > 1 else ""
@@ -11084,12 +11124,25 @@ def prompt():
 # ---------------- START-UP LOGO: the spinning globe with J.A.R.V.I.S. fixed underneath ----------------
 # Same globe as 'jarvis be online' (jv_globe_rows). It only plays on a real terminal, so the start test of an
 # update (which reads the output through a pipe) sees nothing new and the start speed is not affected.
-def jv_logo_lines(R, cols, angle, scan=-1):
+def jv_logo_bar(progress, cols, width=24):
+    """The small loading bar under the title:  [██████░░░░░░░░░░░░░░░░░░]  42%   (progress 0..1)"""
+    p = max(0.0, min(1.0, progress))
+    full = int(round(width * p))
+    cells = [("[", 0.5)] + [("\u2588", 0.95)] * full + [("\u2591", 0.3)] * (width - full) + [("]", 0.5)]
+    cells += [(c, 0.75) for c in f" {int(round(p * 100)):3d}%"]
+    pad = [(" ", 0.0)] * max(0, (cols - len(cells)) // 2)
+    return jv_paint(pad + cells, "cyan")
+
+
+def jv_logo_lines(R, cols, angle, scan=-1, progress=None):
     pad = [(" ", 0.0)] * max(0, (cols - (4 * R + 1)) // 2)
     lines = [jv_paint(pad + row, "cyan") for row in jv_globe_rows(R, angle, scan)]
     title = "J.A.R.V.I.S."
     lines.append("")
     lines.append(jv_paint([(c, 0.95) for c in " " * max(0, (cols - len(title)) // 2) + title], "cyan"))
+    if progress is not None:                                    # start-up only: a loading bar under the title
+        lines.append("")
+        lines.append(jv_logo_bar(progress, cols))
     return lines
 
 
@@ -11115,14 +11168,14 @@ def jv_logo_show():
         out("J.A.R.V.I.S.", CYAN)
         out()
         return
-    Rb = max(Rs, min((rows - 6) // 2, (cols - 6) // 4, 11))
-    total = 2 * Rb + 1 + 2                                      # globe rows + blank + title
+    Rb = max(Rs, min((rows - 8) // 2, (cols - 6) // 4, 11))
+    total = 2 * Rb + 1 + 2 + 2                                  # globe rows + blank + title + blank + loading bar
     pad0 = max(0, (rows - 1 - total) // 2)
     screen = pad0 + total
     state = {"first": True}
 
-    def draw(R, pad, angle, scan=-1):
-        lines = [""] * pad + jv_logo_lines(R, cols, angle, scan)
+    def draw(R, pad, angle, scan=-1, progress=None):
+        lines = [""] * pad + jv_logo_lines(R, cols, angle, scan, progress)
         lines += [""] * (screen - len(lines))
         if not state["first"]:
             sys.stdout.write("\x1b[%dA" % screen)
@@ -11136,14 +11189,14 @@ def jv_logo_show():
         try:
             spin = 34
             for i in range(spin):                               # 1) full screen, the globe spins in the middle
-                draw(Rb, pad0, angle, scan=i % (2 * Rb + 1))
+                draw(Rb, pad0, angle, scan=i % (2 * Rb + 1), progress=0.7 * (i + 1) / spin)
                 angle += 0.07 + 0.2 * (1 - i / spin)
                 time.sleep(0.05)
             steps = 22
             for i in range(1, steps + 1):                       # 2) it shrinks and rises to the top
                 t = i / steps
                 t = t * t * (3 - 2 * t)
-                draw(round(Rb + (Rs - Rb) * t), round(pad0 * (1 - t)), angle)
+                draw(round(Rb + (Rs - Rb) * t), round(pad0 * (1 - t)), angle, progress=0.7 + 0.3 * i / steps)
                 angle += 0.06
                 time.sleep(0.04)
         except KeyboardInterrupt:
