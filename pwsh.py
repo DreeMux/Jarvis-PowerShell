@@ -4649,7 +4649,10 @@ def jv_upd_selftest():
 
         section("Update system (checks only, nothing is installed)")
         run("Get-SecurityStatus panel", cmd("Get-SecurityStatus"), need=["SECURITY STATUS", "FINGERPRINT", "CODE SCAN"])
-        run("implement jarvis -Dry (9 safety checks)", cmd("Implement", "jarvis", "-Dry"), need=["SECURITY GATE"], bad=["would be REFUSED", "BLOCKED"], red=False)
+        cand = os.path.join(tmp, "jarvis_candidate.py")
+        shutil.copyfile(os.path.abspath(__file__), cand)      # the running Jarvis as a candidate: all 9 checks must pass
+        run("implement jarvis <copy of myself> -Dry (all 9 safety checks)", cmd("Implement", "jarvis", cand, "-Dry"),
+            need=["SECURITY GATE", "9/9 gates passed"], bad=["would be REFUSED", "BLOCKED"], red=False)
 
         exts = [n for n in NOMI if GROUPS.get(n) == "Extensions"]
         if exts:
