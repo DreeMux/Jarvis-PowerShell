@@ -25,7 +25,7 @@ a pezzi in src/. Questo script fa la colla tra i due, in entrambe le direzioni:
     parti modificate in src/        ->  pwsh.py viene ricostruito
     pwsh.py modificato da Jarvis    ->  le parti in src/ vengono aggiornate (con backup)
 
-START.bat lo lancia da solo ogni volta (--auto), quindi di solito non devi fare nulla.
+Il menu di start.bat lo lancia da solo ogni volta (--auto), quindi di solito non devi fare nulla.
 
 Uso a mano (di norma non serve):
     python build.py            come --auto
@@ -294,8 +294,8 @@ def auto():
 def check():
     state, cur, built, parts, stamp = diagnose()
     msg = {"sync": "Tutto allineato: src/ e pwsh.py coincidono.",
-           "src": "src/ e' piu' nuova: pwsh.py va ricostruito (--build o avvio con START.bat).",
-           "out": "pwsh.py e' piu' nuovo (l'ha cambiato Jarvis): src/ va aggiornata (--pull o START.bat).",
+           "src": "src/ e' piu' nuova: pwsh.py va ricostruito (--build o avvio con start.bat).",
+           "out": "pwsh.py e' piu' nuovo (l'ha cambiato Jarvis): src/ va aggiornata (--pull o start.bat).",
            "missing": "pwsh.py manca: verra' ricostruito.",
            "conflict": "Conflitto: cambiati tutti e due. Scegli --build o --pull.",
            "nosrc": "Manca src/."}[state]

@@ -18,7 +18,7 @@
 
 Author: DreeMux
 
-Run:  python pwsh.py      (Windows: double-click START.bat)
+Run:  python pwsh.py      (Windows: double-click start.bat)
 Type  help  or just talk to it:  "find my games", "scan this PC for corrupt files".
 
 Everything here is READ-ONLY: nothing of yours is ever written, moved or deleted. Only four things you
@@ -10333,7 +10333,7 @@ def jv_watch_daemon(max_loops=None):
 
 
 def jv_watch_guard_cli(remove=False):
-    """pwsh.py --guard-install / --guard-remove: turns the guard on or off WITHOUT opening Jarvis (used by INSTALLA_GUARDIA.bat).
+    """pwsh.py --guard-install / --guard-remove: turns the guard on or off WITHOUT opening Jarvis (used by the start.bat menu: Install Guard / Delete Guard).
     Returns the exit code."""
     if os.name != "nt":
         print("The guard works only on Windows.")

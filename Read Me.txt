@@ -1,54 +1,74 @@
-JARVIS POWERSHELL  -  modular version 3.2.0 (Screen Watch + Claude Code bridge)
+JARVIS POWERSHELL  -  modular version 3.3.0 (Screen Watch + Claude Code bridge)
 Author: DreeMux
 License: GNU GPL v3 or later (see LICENSE and NOTICE)
 
 A Windows-PowerShell-style terminal you can talk to. It is read-only by default: it only changes things when you
 ask (updating itself, starting a game or a program, saving a report).
 
-HOW TO OPEN:   double-click START.bat     (Python 3 must be installed)
+HOW TO OPEN:   double-click  start.bat     (Python 3 must be installed)
 
-WHAT'S NEW IN THIS VERSION
-  - Claude Code bridge: questions Jarvis cannot answer locally can be passed to Claude Code (on by default).
-  - 23 modules (new: src\20_claude_bridge.py).
+HOW THE FOLDER IS ORGANISED
+  Jarvis\
+    start.bat        the only file you need to open
+    Read Me.txt      this file
+    All Process\     everything else is in here: you do not need to touch it
+        launcher.py     the start screen with the menu (start.bat runs it)
+        pwsh.py         the file that really runs (and that Jarvis checks and updates by itself)
+        src\            the code, split into 23 modules: this is where you work
+        build.py        the "glue" between src\ and pwsh.py (the menu runs it for you)
+        jarvis_update\  Jarvis's logs, heartbeats and data (re-created if missing)
+        backup\         safety copies (created when needed)
 
-WHAT IS IN THE FOLDER:
-  START.bat    one-click start: aligns the modules and opens Jarvis
-  pwsh.py      the file that really runs (and that Jarvis checks and updates by itself). You do not need to touch it.
-  src\         the code, split into 23 modules: this is where you work
-  build.py     the "glue" between src\ and pwsh.py (START.bat runs it for you)
-  INSTALLA_GUARDIA.bat   installs the always-on guard (the name is Italian for "install guard")
-  RIMUOVI_GUARDIA.bat    removes the guard                (Italian for "remove guard")
+THE START SCREEN (start.bat)
+  Black background, terminal font. Jarvis greets you by "typing" letter by letter, like a machine, then the menu appears:
+      1. Install Guard   installs the always-on guard: it starts with Windows even if Jarvis is closed
+      2. Delete Guard    removes the guard
+      3. Proceed         aligns the modules and opens Jarvis normally
+      4. Exit            quits
+  Choose with the up/down arrows + ENTER, or press 1-4 (Esc = exit). Press any key while it is typing to skip the animation.
+  Every time you choose Install Guard, Delete Guard or Proceed, the menu first checks that src\ and pwsh.py are aligned
+  (see below). If there is a syntax error, Jarvis does NOT start and tells you the file and the line.
 
-HOW TO CHANGE THE CODE:
-  1) edit a file in src\   (for example src\14_news.py for the news, src\20_voice.py for the voice)
-  2) double-click START.bat  ->  pwsh.py is rebuilt automatically.
+HOW TO CHANGE THE CODE
+  1) edit a file in All Process\src\   (for example 14_news.py for the news, 20_voice.py for the voice)
+  2) double-click start.bat and choose Proceed  ->  pwsh.py is rebuilt automatically.
      If there is a syntax error, it tells you the file and the line, and NOTHING broken is started.
 
 WHEN JARVIS UPDATES ITSELF ("implement jarvis", data update, etc.):
-  at the next START.bat the changes are copied back into src\ (a backup goes to backup\).
-  If you changed src\ AND Jarvis changed pwsh.py at the same time, nothing is touched and you are told how to choose:
-      python build.py --build   (keep src\)        python build.py --pull   (keep pwsh.py)
-
-USEFUL:   python build.py --check   tells you whether everything is aligned
+  at the next start the changes are copied back into src\ (a backup goes to backup\).
+  If you changed src\ AND Jarvis changed pwsh.py at the same time, nothing is touched and you are told how to choose
+  (from a terminal window inside All Process\):
+      python build.py --build   (keep src\)       python build.py --pull   (keep pwsh.py)
+  Useful:  python build.py --check   tells you whether everything is aligned
 
 IF WINDOWS SAYS "UNKNOWN PUBLISHER" (SmartScreen):
   this is the standard warning for downloaded files; it has nothing to do with the code (read it: it is plain Python).
-  Before extracting: right-click Jarvis.zip -> Properties -> tick "Unblock" -> OK. Or in PowerShell:
+  Before extracting: right-click the zip -> Properties -> tick "Unblock" -> OK. Or in PowerShell:
   Get-ChildItem -Recurse "C:\path\to\Jarvis" | Unblock-File
 
 NOTES:
-  - The folders jarvis_update\, jarvis_exports\ and ext\ live next to pwsh.py.
-    If you had them with an older version, copy them into this folder.
+  - The folders jarvis_update\, jarvis_exports\ and ext\ live next to pwsh.py, that is, inside All Process\.
+    If you had them with an older version, copy them into All Process\.
+  - The old START.bat, INSTALLA_GUARDIA.bat and RIMUOVI_GUARDIA.bat no longer exist: everything is in the start.bat menu.
+  - If you already installed the guard from an older folder, first choose Delete Guard and then Install Guard from this
+    folder, so that the guard points to the new files.
+
+WHAT'S NEW IN THIS VERSION
+  - New start.bat with a start screen and menu (Install Guard / Delete Guard / Proceed / Exit).
+  - Cleaner folder: everything except start.bat and this file is inside All Process\.
+  - Same program as 3.2.0 inside.
 
 SCREEN WATCH (Windows only):  "watch" tells you when someone may be looking at your screen
   (RDP, VNC, TeamViewer, Zoom and similar). It only READS what Windows reports (sessions, connections, processes,
   window titles). Type:  help watch      Its only file is its settings file, jarvis_update\screenwatch.json
 
-ALWAYS-ON GUARD (works even when Jarvis is closed):  type  "watch guard on"  (once).
+ALWAYS-ON GUARD (works even when Jarvis is closed):  from the menu, "Install Guard" (once), or from Jarvis:  "watch guard on".
   It puts a file in your Windows Startup folder that runs the same check in the background, with no window.
   If Jarvis is open, Jarvis gives the warning (and pauses) and the guard stays silent: never two windows.
-  Manage it:  watch guard | on | off (removes everything) | start | stop
+  To remove it: menu "Delete Guard", or from Jarvis "watch guard off".
+  Manage it from Jarvis:  watch guard | on | off (removes everything) | start | stop
   The file:  %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\JarvisScreenWatch.vbs
+  Windows limit: programs in Startup begin a few seconds after the desktop appears, not before.
 
 FIREFOX SHIELD:  while someone is watching your screen, Firefox is dealt with at once. THE DEFAULT SINCE 3.1.3 IS
   "kill": as soon as the guard sees remote access (RDP, VNC, TeamViewer, Zoom, screen sharing...) Firefox is
@@ -81,11 +101,6 @@ CLAUDE CODE BRIDGE (new in 3.2.0):  when you talk to Jarvis and the request is n
   The voice stays off at start-up: to hear the answers say  voice on.
   Optional variables:  JARVIS_CLAUDE_MODEL  (fixes the model),  JARVIS_CLAUDE_TIMEOUT  (seconds, default 180),
   JARVIS_CLAUDE_BIN  (path to the CLI),  JARVIS_CLAUDE_ARGS  (extra arguments).
-
-GUARD AT WINDOWS START, WITHOUT OPENING JARVIS:  double-click  INSTALLA_GUARDIA.bat  ONCE
-  (then it starts by itself every time you log in to Windows, even if Jarvis is never opened).
-  To remove it:  RIMUOVI_GUARDIA.bat
-  Windows limit: programs in Startup begin a few seconds after the desktop appears, not before.
 
 KNOWN ISSUE (fixed in 3.3.2):  the "maintenance" self-test reports 201 of 203 passed. The built-in security scan
   flags a getattr() on subprocess (a constant looked up by name). Nothing breaks, but the scan is not clean.

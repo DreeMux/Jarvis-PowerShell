@@ -986,7 +986,7 @@ def jv_watch_daemon(max_loops=None):
 
 
 def jv_watch_guard_cli(remove=False):
-    """pwsh.py --guard-install / --guard-remove: turns the guard on or off WITHOUT opening Jarvis (used by INSTALLA_GUARDIA.bat).
+    """pwsh.py --guard-install / --guard-remove: turns the guard on or off WITHOUT opening Jarvis (used by the start.bat menu: Install Guard / Delete Guard).
     Returns the exit code."""
     if os.name != "nt":
         print("The guard works only on Windows.")

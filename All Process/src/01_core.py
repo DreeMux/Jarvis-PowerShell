@@ -18,7 +18,7 @@
 
 Author: DreeMux
 
-Run:  python pwsh.py      (Windows: double-click START.bat)
+Run:  python pwsh.py      (Windows: double-click start.bat)
 Type  help  or just talk to it:  "find my games", "scan this PC for corrupt files".
 
 Everything here is READ-ONLY: nothing of yours is ever written, moved or deleted. Only four things you
