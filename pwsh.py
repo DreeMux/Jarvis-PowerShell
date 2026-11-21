@@ -5803,8 +5803,10 @@ def jarvis_interpret(texto):
     """Understand a plain-language request. Also: 'again' repeats the last one, and obvious typos of my own
     keywords are repaired when the first reading finds nothing."""
     low = re.sub(JV_NAMED_RE, " ", texto, flags=re.I).lower()
-    if re.fullmatch(r"\W*(?:hack|hackera|hackerati|auto-?hack)\s+(?:yourself|your ?self|te stesso|tu stesso)\W*", low.strip()):
-        jv_hack_yourself()                  # read-only self-audit, shown step by step
+    mh = re.fullmatch(r"\W*(?:hack|hackera|hackerati|auto-?hack)\s+(?:yourself|your ?self|te stesso|tu stesso)"
+                      r"(\s+(?:report only|no heal|dry))?\W*", low.strip())
+    if mh:
+        jv_hack_yourself(heal=not mh.group(1))   # split-screen self-attack, verdict, then auto-heal
         return True
     words = [w for w in re.findall(r"[a-zà-ÿ']+", low) if w not in JV_FILLER]
     if words and len(words) <= 5 and re.fullmatch(
@@ -5830,7 +5832,10 @@ def jarvis_interpret(texto):
 
 
 class JvSink:
-    """Swallows everything a tested command prints (the self-audit only reports, it does not echo)."""
+    """Swallows everything a tested command prints (the self-audit reports, it does not echo)."""
+    encoding = "utf-8"
+    errors = "replace"
+
     def write(self, text):
         return len(text)
 
@@ -5840,20 +5845,119 @@ class JvSink:
     def isatty(self):
         return False
 
-    encoding = "utf-8"
-    errors = "replace"
 
-
+JV_HACK_WHOLE_PC = ("denux.hunter",)          # with no target these scan the whole computer: not a bug, not attacked bare
 JV_HACK_SKIP = ("exit", "implement", "jarvis", "launch", "maintenance", "voice", "extract.key", "clear-host")
-JV_HACK_ARGS = ("", "-force", "nonexistent_zzz", "/", ".", "..", "*", "'", '"', "-1", "999999999999",
-                "é世界🙂", "a b", "-recurse", "C:\\", "%", "|", "$x", "\x00", "-" * 50, "x" * 3000)
-JV_HACK_PHRASES = ("how many lines", "what is inside", "is it corrupt", "free disk space", "biggest files",
-                   "status", "again", "go up", "ciao", "?", "'", "\x00", "a" * 3000, "é世界🙂", "99999999999")
+# (family, payload): classic input attacks, thrown as plain text at read-only commands. Nothing here is executed as code.
+JV_HACK_PAYLOADS = (
+    ("empty", ""), ("flag", "-force"), ("missing path", "nonexistent_zzz"), ("wildcard", "*"),
+    ("wildcard", "?*[[]"), ("traversal", "../" * 30 + "zz_none"), ("traversal", "..\\" * 30 + "zz_none"),
+    ("null byte", "\x00"), ("null byte", "a\x00b.txt"), ("terminal escape", "\x1b[2J\x1b[31m"),
+    ("terminal title", "\x1b]0;owned\x07"), ("control chars", "\r\n\t\x7f\x08"),
+    ("bidi override", "\u202etxt.exe"), ("zero width", "a\u200bb"), ("lone surrogate", "\ud800"),
+    ("unicode", "\u00e9\u4e16\u754c\U0001F642"), ("format string", "{0.__class__}"), ("format string", "%s%s%s%n"),
+    ("template", "{{7*7}}${7*7}"), ("shell chars", "; echo x && echo y | cat `id` $(id)"),
+    ("quotes", "'\"'\"'"), ("reserved name", "CON"), ("reserved name", "nul.txt"), ("long path", "a" * 5000),
+    ("huge input", "A" * 50000), ("digit flood", "9" * 4000), ("minus flood", "-" * 5000),
+    ("deep nesting", "(" * 3000 + ")" * 3000), ("regex bomb", "a" * 3000 + "!"), ("regex bomb", "(" * 40 + "a" * 40),
+    ("space flood", " " * 5000 + "x"), ("option flood", " ".join(["-x"] * 500)),
+)
+JV_HACK_PREFIXES = ("select ", "tell me about ", "how many lines in ", "what is ", "sha256 of ",
+                    "first 20 lines of ")      # no "find all" / "is it corrupt": those legitimately walk the whole disk
+JV_HACK_FIXABLE = ("ValueError", "TypeError", "OverflowError", "UnicodeError", "UnicodeEncodeError",
+                   "UnicodeDecodeError")
 
 
-def jv_hack_step(n, total, text):
-    jarvis_say(f"[{n}/{total}] {text}")
-    time.sleep(0.15)                          # slow enough to be watched
+def jv_hack_clean(text, width=0):
+    t = re.sub(r"[^\x20-\x7e]", "?", str(text))
+    return t[:width] if width else t
+
+
+class JvSplit:
+    """Two panes side by side: JARVIS' answers on the left, the code he throws at himself on the right.
+    Without a real terminal it falls back to plain sequential lines."""
+
+    def __init__(self):
+        self.o = sys.stdout
+        try:
+            c, r = shutil.get_terminal_size((120, 30))
+        except (OSError, ValueError):
+            c, r = 120, 30
+        self.live = bool(sys.stdin.isatty() and sys.stdout.isatty() and c >= 80 and r >= 14)
+        self.w = max(30, (c - 3) // 2)
+        self.h = max(6, r - 4)
+        self.left, self.right, self.t, self.status = [], [], 0.0, ""
+
+    def say(self, text, color=None):
+        if not self.live:
+            out(jv_hack_clean(text), color or CYAN)
+            return
+        text = jv_hack_clean(text)
+        while len(text) > self.w:
+            self.left.append((text[:self.w], color))
+            text = "  " + text[self.w:]
+        self.left.append((text, color))
+        self.draw()
+
+    def code(self, text, color=None):
+        if self.live:
+            self.right.append((jv_hack_clean(text, self.w), color))
+            self.draw()
+
+    def start(self):
+        if self.live:
+            self.o.write("\x1b[?25l\x1b[2J\x1b[H")
+
+    def stop(self):
+        if self.live:
+            self.draw(True)
+            self.o.write("\x1b[?25h" + TEXT)
+            self.o.flush()
+
+    def draw(self, force=False):
+        if not self.live:
+            return
+        now = time.time()
+        if not force and now - self.t < 0.04:
+            return
+        self.t = now
+        left, right = self.left[-self.h:], self.right[-self.h:]
+        w = self.w
+        buf = ["\x1b[H", f"{CYAN}{'JARVIS // RESPONSES':<{w}}{GRAY}|{JV_SEC_A}{'RED TEAM // CODE I THROW AT MYSELF':<{w}}\x1b[K{TEXT}\n",
+               f"{GRAY}{'-' * w}+{'-' * w}\x1b[K{TEXT}\n"]
+        for i in range(self.h):
+            lt, lc = left[i] if i < len(left) else ("", None)
+            rt, rc = right[i] if i < len(right) else ("", None)
+            buf.append(f"{lc or TEXT}{lt:<{w}}{GRAY}|{rc or TEXT}{rt:<{w}}\x1b[K{TEXT}\n")
+        buf.append(f"{JV_SEC_G}{jv_hack_clean(self.status, 2 * w + 1):<{2 * w + 1}}\x1b[K{TEXT}\n")
+        self.o.write("".join(buf))
+        self.o.flush()
+
+
+def jv_hack_attempt(fn, limit=3.0):
+    """Runs one attack in its own thread so a hang (for example a runaway regex) is caught, not suffered."""
+    box = {}
+    me = os.path.abspath(__file__)
+
+    def run():
+        try:
+            fn()
+        except SystemExit:
+            pass
+        except Exception as e:                            # a crash the shell would have to catch for you
+            tb, spot = e.__traceback__, None
+            while tb:
+                if os.path.abspath(tb.tb_frame.f_code.co_filename) == me:
+                    spot = (tb.tb_frame.f_code.co_name, tb.tb_lineno)
+                tb = tb.tb_next
+            box["crash"] = (spot or ("?", 0), type(e).__name__, str(e)[:70])
+    t0 = time.time()
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    th.join(limit)
+    if th.is_alive():
+        return "hang", time.time() - t0, None
+    return ("crash" if "crash" in box else "held"), time.time() - t0, box.get("crash")
 
 
 def jv_hack_static(src):
@@ -5864,7 +5968,7 @@ def jv_hack_static(src):
         tree = ast.parse(src)
     except SyntaxError as e:
         return [("SYNTAX", e.lineno or 0, str(e.msg))], notes
-    known = set(dir(len.__self__)) | {"__file__", "__name__", "__doc__"}
+    known = set(dir(len.__self__)) | {"__file__", "__name__", "__doc__"}   # len.__self__ is the builtins module
     defined = set()
     for n in ast.walk(tree):
         if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
@@ -5897,12 +6001,6 @@ def jv_hack_static(src):
             mode = n.args[1].value if len(n.args) > 1 and isinstance(n.args[1], ast.Constant) else ""
             if "b" not in str(mode) and "encoding" not in {k.arg for k in n.keywords}:
                 found.append(("OPEN WITHOUT ENCODING", n.lineno, "text file read with the system default"))
-    for n in tree.body:
-        if isinstance(n, (ast.Import, ast.ImportFrom)):
-            for a in n.names:
-                nm = (a.asname or a.name).split(".")[0]
-                if nm not in loaded and nm not in src.replace("import " + nm, ""):
-                    found.append(("UNUSED IMPORT", n.lineno, nm))
     for scope in ast.walk(tree):
         if isinstance(scope, (ast.Module, ast.ClassDef, ast.FunctionDef)):
             seen = {}
@@ -5915,36 +6013,63 @@ def jv_hack_static(src):
     return found, notes
 
 
-def jv_hack_dynamic():
-    """Throws hostile arguments at every safe command and at the plain-language reader. Returns (calls, crashes)."""
+def jv_hack_dynamic(split):
+    """Throws every payload at every safe command and at the plain-language reader.
+    Returns (attacks, crashes, hangs); crashes maps (function, line) -> (what, error, message)."""
     saved_ctx, saved_cwd, saved_out = dict(CONTESTO), os.getcwd(), sys.stdout
-    calls, crashes = 0, {}
+    targets = [(n, f) for n, f in NOMI.items() if n.lower() not in JV_HACK_SKIP]
+    plan = {n: [(fam, pay, list(extra) + ([pay] if pay else [])) for fam, pay in JV_HACK_PAYLOADS
+                for extra in ((), ("-force",))
+                if (pay and not pay.startswith("-")) or n.lower() not in JV_HACK_WHOLE_PC]       # no target = it would scan the whole PC
+            for n, _ in targets}
+    total = sum(len(v) for v in plan.values()) + len(JV_HACK_PREFIXES) * len(JV_HACK_PAYLOADS)
+    stats = {"done": 0, "held": 0}
+    crashes, hangs, t0 = {}, [], time.time()
 
-    def attempt(label, fn):
-        nonlocal calls
-        calls += 1
+    def launch(label, code, fn):
         sys.stdout = JvSink()
         try:
-            fn()
-        except SystemExit:
-            pass
-        except Exception as e:                       # a crash the shell would have to catch for you
-            tb = e.__traceback__
-            while tb.tb_next:
-                tb = tb.tb_next
-            crashes.setdefault((tb.tb_frame.f_code.co_name, tb.tb_lineno), (label, type(e).__name__, str(e)[:70]))
+            res, took, info = jv_hack_attempt(fn)
         finally:
             sys.stdout = saved_out
+            try:
+                os.chdir(saved_cwd)
+            except OSError:
+                pass
+        stats["done"] += 1
+        if res == "held":
+            stats["held"] += 1
+            split.code(f"held  {code}", JV_SEC_D)
+        elif res == "crash":
+            crashes.setdefault(info[0], (label, info[1], info[2]))
+            split.code(f"CRASH {code}", RED)
+            split.say(f"CRASH in {info[0][0]}() line {info[0][1]}: {info[1]}", RED)
+        else:
+            hangs.append(label)
+            split.code(f"HANG  {code}", JV_SEC_A)
+            split.say(f"HANG (>3s): {label}", JV_SEC_A)
+        split.status = (f"attacks {stats['done']}/{total}   held {stats['held']}   crashes {len(crashes)}   "
+                        f"hangs {len(hangs)}   {time.time() - t0:4.1f}s")
+        split.draw()
+        return len(hangs) < 4
+
     try:
-        for nome, fn in list(NOMI.items()):
-            if nome.lower() in JV_HACK_SKIP:
-                continue
-            for a in JV_HACK_ARGS:
-                CONTESTO["riga"] = f"{nome} {a}"
-                attempt(f"{nome} {a[:20]!r}", lambda fn=fn, a=a: fn([a] if a else []))
-        for ph in JV_HACK_PHRASES:
-            CONTESTO["riga"] = ph
-            attempt(f"jarvis {ph[:20]!r}", lambda ph=ph: jarvis_interpret(ph))
+        for nome, fn in targets:
+            split.say(f"Attacking {nome} ...", TEXT)
+            for fam, pay, args in plan[nome]:
+                CONTESTO["riga"] = f"{nome} {pay}"
+                if not launch(f"{nome} [{fam}]", f"{fn.__name__}({jv_hack_clean(repr(args))})",
+                              lambda fn=fn, args=args: fn(list(args))):
+                    split.say("Too many hangs, stopping the attack here.", JV_SEC_A)
+                    return stats["done"], crashes, hangs
+        split.say("Attacking the plain-language reader ...", TEXT)
+        for pre in JV_HACK_PREFIXES:
+            for fam, pay in JV_HACK_PAYLOADS:
+                CONTESTO["riga"] = pre + pay
+                if not launch(f"jarvis '{pre}' [{fam}]", f"jarvis({jv_hack_clean(repr(pre + pay))})",
+                              lambda t=pre + pay: jarvis_interpret(t)):
+                    split.say("Too many hangs, stopping the attack here.", JV_SEC_A)
+                    return stats["done"], crashes, hangs
     finally:
         sys.stdout = saved_out
         try:
@@ -5953,59 +6078,159 @@ def jv_hack_dynamic():
             pass
         CONTESTO.clear()
         CONTESTO.update(saved_ctx)
-    return calls, crashes
+    return stats["done"], crashes, hangs
 
 
-def jv_hack_yourself():
-    """'jarvis hack yourself': Jarvis audits his own code in front of you. READ-ONLY: it reads this file and runs
-    harmless commands with hostile arguments; it fixes nothing by itself and writes nothing."""
-    total = 5
-    out()
-    jarvis_say("Self-audit started, sir. I will look for my own mistakes. Nothing will be changed.")
-    out()
-    jv_hack_step(1, total, "Reading my own source code (read-only).")
+def jv_hack_heal(src, found, crashes):
+    """Conservative, mechanical fixes only (never touches the protected updater/launcher code).
+    Returns (new_source, applied, manual): applied/manual are lists of text lines."""
+    import ast
+    tree = ast.parse(src)
+    lines = src.split("\n")
+    prot = [(n.lineno, n.end_lineno) for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name.startswith(JV_UPD_PROTECTED)]
+    edits, applied, manual = [], [], []
+
+    def protected(ln):
+        return any(a <= ln <= b for a, b in prot)
+
+    def col(ln, off):                                    # ast offsets are UTF-8 bytes, Python slices are characters
+        return len(lines[ln - 1].encode("utf-8")[:off].decode("utf-8", "ignore"))
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ExceptHandler) and n.type is None and not protected(n.lineno):
+            at = lines[n.lineno - 1].find("except:")
+            if at >= 0:
+                edits.append((n.lineno, at, at + 7, "except Exception:"))
+                applied.append(f"line {n.lineno}: bare 'except:' -> 'except Exception:'")
+        elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "open" and n.args
+              and n.lineno == n.end_lineno and not protected(n.lineno)):
+            mode = n.args[1].value if len(n.args) > 1 and isinstance(n.args[1], ast.Constant) else ""
+            if mode in ("", "r", "rt") and "encoding" not in {k.arg for k in n.keywords}:
+                at = col(n.end_lineno, n.end_col_offset) - 1
+                if lines[n.end_lineno - 1][at:at + 1] == ")":
+                    edits.append((n.end_lineno, at, at, ', encoding="utf-8", errors="replace"'))
+                    applied.append(f"line {n.lineno}: open() now reads as UTF-8")
+    for (func, line), (label, kind, msg) in crashes.items():
+        done = False
+        if kind in JV_HACK_FIXABLE and not protected(line):
+            for fn in ast.walk(tree):
+                if isinstance(fn, ast.FunctionDef) and fn.name == func and fn.lineno <= line <= fn.end_lineno:
+                    for tr in ast.walk(fn):
+                        if isinstance(tr, ast.Try) and tr.body[0].lineno <= line <= tr.body[-1].end_lineno:
+                            for h in tr.handlers:
+                                if isinstance(h.type, ast.Name) and h.type.id == "OSError" and h.lineno == h.type.lineno:
+                                    c0 = col(h.type.lineno, h.type.col_offset)
+                                    edits.append((h.type.lineno, c0, c0 + 7, f"(OSError, {kind})"))
+                                    applied.append(f"line {h.lineno}: {func}() now also catches {kind} (crash: {label})")
+                                    done = True
+        if not done:
+            manual.append(f"{func}() line {line}: {kind}: {msg}  (needs a human)")
+    for kind, line, detail in found:
+        if kind not in ("BARE EXCEPT", "OPEN WITHOUT ENCODING"):
+            manual.append(f"line {line}: {kind}: {detail}  (needs a human)")
+    seen, uniq = set(), []
+    for e in edits:
+        if (e[0], e[1]) not in seen:
+            seen.add((e[0], e[1]))
+            uniq.append(e)
+    for ln, a, b, rep in sorted(uniq, reverse=True):
+        lines[ln - 1] = lines[ln - 1][:a] + rep + lines[ln - 1][b:]
+    new = "\n".join(lines)
     try:
-        with open(os.path.abspath(__file__), encoding="utf-8", errors="replace") as f:
-            src = f.read()
+        ast.parse(new)
+    except SyntaxError:
+        return src, [], manual + ["the automatic fix would have broken the syntax, so it was dropped"]
+    return new, applied, manual
+
+
+def jv_hack_yourself(heal=True):
+    """'jarvis hack yourself': Jarvis attacks his own code in front of you (split screen), publishes the verdict
+    and, if there is something mechanical to fix, sends the fix through 'implement jarvis' (9 gates + backup).
+    The attack itself is READ-ONLY: it reads this file and runs harmless commands with hostile input."""
+    me = os.path.abspath(__file__)
+    try:
+        with open(me, "rb") as f:
+            raw = f.read()
     except OSError as e:
         jarvis_say(f"I cannot read myself: {safe(str(e))}")
         return
-    out(f"      {len(src):,} characters read.", GRAY)
-    jv_hack_step(2, total, "Checking that every line is valid Python and that every name exists.")
-    found, notes = jv_hack_static(src)
-    for note in notes:
-        out(f"      {note}", GRAY)
-    real = [x for x in found if x[0] not in ("UNUSED IMPORT",)]
-    for kind, line, detail in found[:25]:
-        out(f"      line {line:>5}  {kind:<22} {safe(str(detail))}", JV_SEC_A)
-    if len(found) > 25:
-        out(f"      ... and {len(found) - 25} more.", GRAY)
-    if not found:
-        out("      Nothing found.", GREEN)
-    jv_hack_step(3, total, "Attacking every safe command with hostile input (empty, huge, null bytes, emoji, wildcards).")
-    calls, crashes = jv_hack_dynamic()
-    out(f"      {calls} attacks launched.", GRAY)
-    for (func, line), (label, kind, msg) in list(crashes.items())[:25]:
-        out(f"      CRASH in {func}() line {line}: {kind}: {safe(msg)}   <- {safe(label)}", RED)
-    if not crashes:
-        out("      No command crashed.", GREEN)
-    jv_hack_step(4, total, "Running my own security scan on this file.")
+    sha0 = hashlib.sha256(raw).hexdigest()
+    src = raw.decode("utf-8", "replace")
+    sp = JvSplit()
+    sp.start()
     try:
-        import ast
-        viol = jv_upd_scan(ast.parse(src))
-        n = len(viol) if viol is not None else 0
-        out(f"      {n} violation(s).", GREEN if n == 0 else RED)
-    except Exception as e:
-        out(f"      scan not available here: {safe(str(e))}", GRAY)
-    jv_hack_step(5, total, "Verdict.")
-    bad = len(real) + len(crashes)
+        sp.say("Self-attack started. Nothing will be changed during the attack.", CYAN)
+        sp.say(f"[1/5] Reading my own code: {len(raw):,} bytes, sha256 {sha0[:12]}...")
+        sp.code("# red team: static pass", JV_SEC_A)
+        found, notes = jv_hack_static(src)
+        sp.say(f"[2/5] Static analysis: {notes[0] if notes else 'syntax error'}")
+        for kind, line, detail in found[:12]:
+            sp.say(f"line {line}: {kind} {detail}", JV_SEC_A)
+            sp.code(f"static: {kind} @ {line}", JV_SEC_A)
+        sp.say(f"      {len(found)} finding(s).", GREEN if not found else JV_SEC_A)
+        sp.say("[3/5] Dynamic attack: 32 hostile payloads x every safe command.")
+        attacks, crashes, hangs = jv_hack_dynamic(sp)
+        sp.say(f"      {attacks} attacks, {len(crashes)} crash(es), {len(hangs)} hang(s).",
+               GREEN if not (crashes or hangs) else RED)
+        sp.say("[4/5] Running my own security scan.")
+        try:
+            import ast
+            viol = jv_upd_scan(ast.parse(src))
+            n_viol = len(viol) if viol is not None else 0
+            sp.say(f"      {n_viol} violation(s).", GREEN if n_viol == 0 else RED)
+        except (SyntaxError, ValueError, RecursionError) as e:
+            n_viol = 1
+            sp.say(f"      scan failed: {safe(str(e))}", RED)
+        try:
+            with open(me, "rb") as f:
+                same = hashlib.sha256(f.read()).hexdigest() == sha0
+        except OSError:
+            same = False
+        sp.say(f"[5/5] Integrity: my file is {'unchanged by the attack' if same else 'DIFFERENT after the attack'}.",
+               GREEN if same else RED)
+    finally:
+        sp.stop()
+    problems = len(found) + len(crashes) + len(hangs) + n_viol + (0 if same else 1)
     out()
-    if bad == 0:
-        jarvis_say("Self-audit complete: no errors found, sir. I am clean.")
-    else:
-        jarvis_say(f"Self-audit complete: {len(real)} code problem(s) and {len(crashes)} crash(es). "
-                   "Tell your assistant to fix them: I never change myself without 'implement jarvis'.")
+    jv_upd_box("SELF-ATTACK // VERDICT")
+    out(f"attacks launched : {attacks}", TEXT)
+    out(f"code findings    : {len(found)}", TEXT)
+    out(f"crashes / hangs  : {len(crashes)} / {len(hangs)}", TEXT)
+    out(f"security scan    : {n_viol} violation(s)", TEXT)
+    out(f"file integrity   : {'unchanged' if same else 'CHANGED'}", TEXT)
     out()
+    if problems == 0:
+        out("[+] NO WEAKNESS FOUND with these attacks.", JV_SEC_G)
+        out("    This is a robustness test of my own code, not a certification: it proves nothing about attacks it did not try.", GRAY)
+        out()
+        return
+    out(f"[!] {problems} weakness(es) found.", RED)
+    new_src, applied, manual = jv_hack_heal(src, found, crashes)
+    for a in applied:
+        out(f"    will fix : {safe(a)}", JV_SEC_G)
+    for m in manual:
+        out(f"    manual   : {safe(m)}", JV_SEC_A)
+    out()
+    if not applied:
+        jarvis_say("I cannot cure these by myself, sir. They are listed above.")
+        out()
+        return
+    if not heal:
+        jarvis_say(f"{len(applied)} fix(es) are ready. Run 'jarvis hack yourself' without 'report only' to apply them.")
+        out()
+        return
+    staged = None
+    try:
+        staged = jv_upd_stage(new_src.encode("utf-8"), "autoheal.py")
+        jarvis_say("Auto-heal: sending the cure through the patch gates (backup + automatic rollback).")
+        jv_upd_cmd(["jarvis", staged])                  # 9 checks; on any failure nothing is installed
+    except (OSError, ValueError) as e:
+        out(f"Auto-heal stopped, nothing was changed: {safe(str(e))}", RED)
+        out()
+    finally:
+        if staged:
+            jv_upd_discard(staged)
 
 
 @cmdlet("Jarvis", group="Assistant", usage="""jarvis <request in plain English or Italian>
