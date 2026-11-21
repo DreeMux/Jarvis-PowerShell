@@ -1567,7 +1567,7 @@ def get_help(args):
         ("find my games", "locate the data.win of your games   (also: scan this PC for corrupt files, status, examples)"),
         ("implement jarvis", "update myself: 9 safety checks, backup, automatic rollback  (-Dry = checks only)"),
         ("implement jarvis <file.py>", "install that file;  <https://...> -Sha256 <hash>  downloads it first (hash required)"),
-        ("maintenance", "read-only health check: integrity, security scan, backups, quarantine, last log lines"),
+        ("maintenance", "maintenance mode: health check, then tests EVERY command (also: jarvis go in maintenance)"),
     ):
         out(f"  {a.ljust(34)}{b}")
     out()
@@ -3402,6 +3402,10 @@ def jarvis_interpret(texto):
         jarvis_status("Current status")
         return True
 
+    if jv_is_maintenance(t):           # "go in maintenance", "test all the commands"...
+        jarvis_say("Entering maintenance mode, sir. I'm putting everything else on hold and testing every command.")
+        jv_upd_maintenance_cmd([])
+        return True
     if jv_deep(orig, t, sel):          # specific questions about files/folders + opening files
         return True
     if has("thank", "grazie"):
@@ -4292,9 +4296,7 @@ def jv_upd_cmd(args):
 
 
 # ---------------- maintenance (read-only health check) ----------------
-@cmdlet("Maintenance", group="Assistant", usage="""maintenance     read-only health check of Jarvis: integrity, security scan, backups, quarantine, last log lines
-(it changes nothing; to update, use  implement jarvis)""")
-def jv_upd_maintenance_cmd(args):
+def jv_upd_health(args):
     """Read-only health check of Jarvis (integrity, security scan, backups, log)."""
     import ast
     me = os.path.abspath(__file__)
@@ -4341,6 +4343,303 @@ def jv_upd_maintenance_cmd(args):
     out("  Last log     : " + ("(none yet)" if not last else ""), GRAY)
     for ln in last:
         out("    " + safe(ln)[:150], GRAY)
+    out()
+
+
+def jv_upd_png(truncate=False):
+    """A tiny valid PNG (2 x 3 pixels), optionally cut short to make a damaged one."""
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    raw = b"".join(b"\x00" + b"\x10\x20\x30" * 2 for _ in range(3))
+    data = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 3, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+    return data[:-9] if truncate else data
+
+
+def jv_upd_samples(tmp):
+    """Throw-away sample files used by the self-test (they live in a temporary folder that is deleted after)."""
+    def w(name, text):
+        with open(os.path.join(tmp, name), "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    text = "alpha beta\ngamma delta\nalpha again\nlast line\n"
+    w("a.txt", text)
+    w("dup.txt", text)
+    w("e.txt", "")
+    w("data.csv", "name,score\nx,1\ny,3\n")
+    w("data.json", json.dumps({"alpha": 1, "beta": [1, 2, 3]}))
+    with zipfile.ZipFile(os.path.join(tmp, "z.zip"), "w") as z:
+        z.writestr("inside.txt", "hello")
+    with open(os.path.join(tmp, "p.png"), "wb") as f:
+        f.write(jv_upd_png())
+    with open(os.path.join(tmp, "bad.png"), "wb") as f:
+        f.write(jv_upd_png(True))
+    con = sqlite3.connect(os.path.join(tmp, "db.sqlite"))
+    con.execute("CREATE TABLE items (id INTEGER, name TEXT)")
+    con.execute("INSERT INTO items VALUES (1, 'one')")
+    con.commit()
+    con.close()
+    os.makedirs(os.path.join(tmp, "sub"))
+    body = b"GEN8" + struct.pack("<I", 60) + bytes(60) + b"SPRT" + struct.pack("<I", 4) + struct.pack("<I", 0)
+    with open(os.path.join(tmp, "sub", "data.win"), "wb") as f:
+        f.write(b"FORM" + struct.pack("<I", len(body)) + body)
+
+
+def jv_is_maintenance(t):
+    """True for 'go in maintenance', 'maintenance mode', 'manutenzione', 'test all the commands'..."""
+    toks = [x.strip(",.!?;:") for x in t.split()]
+    names = ["maintenance", "manutenzione"]
+    has_m = any("." not in x and "/" not in x and "\\" not in x and difflib.get_close_matches(x, names, n=1, cutoff=0.78)
+                for x in toks)
+    starters = ("go", "enter", "switch", "put", "start", "run", "begin", "vai", "entra", "passa", "metti", "mettiti",
+                "avvia", "fai", "please", "now", "ora", "can", "could", "puoi")
+    if has_m and (len(toks) <= 3 or (toks and toks[0] in starters)):
+        return True
+    return bool(re.search(r"\b(?:test|check|verify|testa|controlla|verifica|prova)\b.*\b(?:commands?|comandi)\b", t)
+                and not re.search(r"\.\w{1,5}\b", t))
+
+
+def jv_upd_selftest():
+    """Run every command of Jarvis once on throw-away sample files and report what works.
+    Nothing outside the temporary folder is touched; no game or file is opened. Returns (passed, total)."""
+    import io
+    import tempfile
+    snap, old_cwd = dict(CONTESTO), os.getcwd()
+    tmp = tempfile.mkdtemp(prefix="jarvis_selftest_")
+    results = []
+    tag = {"n": 0}
+
+    def run(label, fn, need=(), expect="ok", bad=(), red=False, empty=False):
+        buf, old = io.StringIO(), sys.stdout
+        sys.stdout = buf
+        problem, exited = None, False
+        try:
+            fn()
+        except SystemExit:
+            exited = True
+        except KeyboardInterrupt:
+            sys.stdout = old
+            raise
+        except Exception as e:
+            problem = f"{type(e).__name__}: {e}"
+        finally:
+            sys.stdout = old
+        text = buf.getvalue()
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        if problem is None:
+            if expect == "exit":
+                if not exited:
+                    problem = "it did not close the shell"
+            elif exited:
+                problem = "it closed the shell by itself"
+        if problem is None and expect != "exit":
+            if "Traceback" in plain or "I ran into trouble" in plain:
+                problem = "internal error: " + next((l.strip() for l in plain.splitlines()
+                                                     if "Traceback" in l or "I ran into trouble" in l), "")[:90]
+            elif expect == "err" and RED not in text:
+                problem = "no error message was shown"
+            elif expect == "ok" and RED in text and not red:
+                problem = "it printed an error: " + next((re.sub(r"\x1b\[[0-9;]*m", "", l).strip()
+                                                          for l in text.splitlines() if RED in l), "")[:90]
+            elif not plain.strip() and not empty:
+                problem = "no output"
+            else:
+                for s in need:
+                    if s not in plain:
+                        problem = f"output lacks '{s}'"
+                        break
+                for s in bad:
+                    if s in plain and problem is None:
+                        problem = f"output contains '{s}'"
+        tag["n"] += 1
+        results.append((label, problem))
+        out(f"  {'[ OK ]' if problem is None else '[FAIL]'} {label}" + (f"  -> {problem}" if problem else ""),
+            GREEN if problem is None else RED)
+
+    def cmd(name, *a):
+        def f():
+            CONTESTO["riga"] = name + " " + " ".join(a)
+            CMDLETS[name.lower()](list(a))
+        return f
+
+    def say(text):
+        def f():
+            if not jarvis_interpret(text):
+                raise RuntimeError("Jarvis did not understand it")
+        return f
+
+    def section(title):
+        out()
+        out(title, YELLOW)
+
+    try:
+        jv_upd_samples(tmp)
+        os.chdir(tmp)
+        CONTESTO["file"] = None
+        CONTESTO["jlast"] = None
+        CONTESTO.pop("jlist", None)
+        sub = os.path.join(tmp, "sub")
+
+        section("Registry")
+        def registry():
+            for n, fn in NOMI.items():
+                if CMDLETS.get(n.lower()) is not fn:
+                    raise RuntimeError(f"{n} is not registered")
+                for a in ALIASES[n]:
+                    if CMDLETS.get(a.lower()) is not fn:
+                        raise RuntimeError(f"alias {a} of {n} is broken")
+            print(f"{len(NOMI)} commands, {len(CMDLETS)} names")
+        run("every command and alias is registered", registry)
+
+        section("Standard commands")
+        run("Get-Location", cmd("Get-Location"), need=[tmp])
+        run("Get-ChildItem", cmd("Get-ChildItem"), need=["a.txt", "data.csv", "sub"])
+        run("Get-ChildItem on a missing path (must show an error)", cmd("Get-ChildItem", "nope_missing"), expect="err")
+        run("Set-Location into a folder", cmd("Set-Location", "sub"), empty=True)
+        run("  ...and back", cmd("Set-Location", ".."), empty=True)
+        run("Set-Location on a file selects it", cmd("Set-Location", "a.txt"), need=["Selected file"])
+        run("Set-Location on a missing folder (must show an error)", cmd("Set-Location", "nope_missing"), expect="err")
+        CONTESTO["file"] = None
+        run("Write-Output", cmd("Write-Output", "hello", "world"), need=["hello world"])
+        run("Write-Host", cmd("Write-Host", "hello"), need=["hello"])
+        run("Get-Content", cmd("Get-Content", "a.txt"), need=["alpha beta", "last line"])
+        run("Get-Content on a missing file (must show an error)", cmd("Get-Content", "nope_missing.txt"), expect="err")
+        run("Clear-Host", cmd("Clear-Host"), empty=True)
+        run("Get-Command lists everything", cmd("Get-Command"), need=list(NOMI))
+        run("Get-Help (full list)", cmd("Get-Help"), need=["Available commands"])
+        def helps():
+            for n in list(NOMI):
+                CMDLETS["get-help"]([n])
+        run("Get-Help <command> for every command", helps, need=["SYNTAX"])
+        run("Exit closes the shell", cmd("Exit"), expect="exit", empty=True)
+
+        section("Port tools (on sample files)")
+        samples = ["a.txt", "data.csv", "data.json", "z.zip", "p.png", "db.sqlite", "e.txt", "bad.png",
+                   os.path.join("sub", "data.win")]
+        for s in samples:
+            run(f"extract.port {s}", cmd("extract.port", s), need=["Name", "Size"], bad=["Read error"])
+        for s in samples:
+            run(f"interact.port {s}", cmd("interact.port", s), need=["What you can DO"], bad=["Could not read"],
+                red=(s == "bad.png"))
+        run("extract.port on a missing file (must show an error)", cmd("extract.port", "nope_missing"), expect="err")
+        run("denux.hunter finds the damaged PNG", cmd("denux.hunter", ".", "-Recurse"), need=["bad.png", "CORRUPT"], red=True)
+        run("denux.hunter on one good file", cmd("denux.hunter", "a.txt"), need=["0 corrupt"])
+        run("denux.hunter on one damaged file", cmd("denux.hunter", "bad.png"), need=["CORRUPT"], red=True)
+        run("undersopic.key finds the sample data.win", cmd("undersopic.key", tmp), need=["Found 1 data.win"])
+        run("pluton.key", cmd("pluton.key", "a.txt"), need=["Pluton report", "FILES", "MEMORY", "BATTERY"])
+        run("pluton.key -Watch 1", cmd("pluton.key", "a.txt", "-Watch", "1"), need=["Pluton report"])
+
+        section("Jarvis, plain language (read-only questions)")
+        phrases = [
+            ("status", []), ("what time is it", [":"]), ("free disk space", ["free"]), ("who are you", ["JARVIS"]),
+            ("thank you", []), ("examples", ["ANY FILE"]), ("what os is this", []), ("uptime", []),
+            ("how many files here", ["file(s)"]), ("biggest files", ["Biggest"]), ("find all png files", ["2 file(s)"]),
+            ("duplicates", ["identical"]), ("modified today", ["file(s)"]), ("by extension", [".txt"]),
+            ("empty files", ["empty"]), ("files bigger than 1 byte", ["file(s)"]),
+            ("select a.txt", ["Selected"]), ("how many lines", ["4 line"]), ("first 2 lines", ["alpha beta"]),
+            ("last 1 lines", ["last line"]), ("search for alpha", ["2 time"]), ("sha256", ["SHA256"]),
+            ("is it corrupt", ["No damage"]), ("how big is it", ["weighs"]), ("when was it modified", ["modified"]),
+            ("what type is it", ["Text file"]), ("hex dump", ["61 6C"]),
+            ("select data.csv", ["Selected"]), ("which columns", ["name, score"]), ("average of score", ["2"]),
+            ("select data.json", ["Selected"]), ("which keys", ["alpha"]),
+            ("select z.zip", ["Selected"]), ("what is inside", ["inside.txt"]),
+            ("select db.sqlite", ["Selected"]), ("which tables", ["items"]), ("how many rows in items", ["1 row"]),
+            ("select p.png", ["Selected"]), ("dimensions", ["2 x 3"]),
+            ("select bad.png", ["Selected"]), ("is it corrupt", ["damaged"]),
+            ("select e.txt", ["Selected"]), ("is it corrupt", ["empty"]),
+            ("select sub/data.win", ["Selected"]), ("what game is this", ["2 chunks"]), ("how many sprites", ["0 sprites"]),
+            ("list the chunks", ["GEN8", "SPRT"]), ("go up", ["Now in"]), ("read a.txt", ["alpha beta"]),
+            ("what is selected", []), ("deselect", []),
+            ("tell me about a.txt", ["SHA256"]), ("what's inside a.txt", ["First 15 lines"]),
+        ]
+        for text, need in phrases:
+            run(f"jarvis: {text}", say(text), need=need)
+
+        section("Maintenance wording")
+        def wording():
+            for yes in ("go in maintenance", "go in maintance", "maintenance mode", "jarvis maintenance".replace("jarvis ", ""),
+                        "vai in manutenzione", "test all the commands", "testa tutti i comandi", "enter maintenance mode"):
+                if not jv_is_maintenance(yes):
+                    raise RuntimeError(f"'{yes}' is not recognised")
+            for no in ("open maintenance.txt", "find my games", "how many lines", "what is the status"):
+                if jv_is_maintenance(no):
+                    raise RuntimeError(f"'{no}' was taken for maintenance")
+            print("ok")
+        run("the phrases that start maintenance mode", wording)
+
+        section("Game launcher (nothing is started)")
+        def match():
+            games = [{"name": "Cry of Fear", "alt": ""}, {"name": "Fear to Fathom", "alt": ""},
+                     {"name": "DELTARUNE", "alt": "DELTARUNE"}]
+            for phrase, want in (("cry of fear", "Cry of Fear"), ("the game cry of fear please", "Cry of Fear"),
+                                 ("fear to fhatom", "Fear to Fathom"), ("deltarune", "DELTARUNE")):
+                got, _ = jv_launch_match(phrase, games)
+                if [g["name"] for g in got] != [want]:
+                    raise RuntimeError(f"'{phrase}' gave {[g['name'] for g in got]}, expected {want}")
+            if jv_launch_match("zzzzqq", games)[0]:
+                raise RuntimeError("an unknown name matched a game")
+            print("ok")
+        run("matching a spoken name to a game (also with typos)", match)
+        def listing():
+            games = jv_launch_games(force=True)
+            print(f"{len(games)} game(s) found on this PC: " + ", ".join(safe(g["name"]) for g in games[:12]))
+        run("finding the games installed on this PC", listing)
+        def blocked():
+            win = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32", "notepad.exe") \
+                if os.name == "nt" else "/etc/hosts"
+            if jv_launch_blocked(win) is None:
+                raise RuntimeError("a Windows/system file is not blocked")
+            if jv_launch_blocked(os.path.join(tmp, "a.txt")) is not None:
+                raise RuntimeError("a normal file is blocked")
+            jv_launch_file(win)
+        run("system files are refused, normal files allowed", blocked, need=["I won't open"])
+        run("a program outside its game folder is refused", lambda: jv_launch_run(
+            {"name": "test", "root": sub, "wins": [], "generic": True},
+            ("launcher", os.path.join(tmp, "a.txt"), None)), need=["I won't start"])
+
+        section("Update system (checks only, nothing is installed)")
+        run("implement jarvis -Dry (9 safety checks)", cmd("Implement", "jarvis", "-Dry"), bad=["would be REFUSED"], red=False)
+
+        exts = [n for n in NOMI if GROUPS.get(n) == "Extensions"]
+        if exts:
+            section("Extensions (from ext/): registered and documented; not executed, I do not know their arguments")
+            for n in exts:
+                run(f"help {n}", cmd("Get-Help", n), need=["SYNTAX"])
+    except KeyboardInterrupt:
+        out()
+        out("Stopped by user: the results are partial.", YELLOW)
+    finally:
+        try:
+            os.chdir(old_cwd)
+        except OSError:
+            pass
+        CONTESTO.clear()
+        CONTESTO.update(snap)
+        shutil.rmtree(tmp, ignore_errors=True)
+    failed = [r for r in results if r[1]]
+    return len(results) - len(failed), len(results), failed
+
+
+@cmdlet("Maintenance", group="Assistant", usage="""maintenance     maintenance mode: health check of Jarvis, then a test of EVERY command
+(say it in plain words too: "jarvis go in maintenance", "jarvis test all the commands")
+The tests run on sample files in a temporary folder that is deleted afterwards: nothing of yours is changed,
+no game or file is opened, nothing is installed. To update, use  implement jarvis)""")
+def jv_upd_maintenance_cmd(args):
+    """Maintenance mode: health check of Jarvis and a test of every command."""
+    out()
+    out("=== MAINTENANCE MODE ===  (everything else is on hold; Ctrl+C stops it)", CYAN)
+    jv_upd_health([])
+    out("Testing every command on sample files in a temporary folder (deleted afterwards)...", GRAY)
+    t0 = time.monotonic()
+    ok, total, failed = jv_upd_selftest()
+    out()
+    secs = time.monotonic() - t0
+    if failed:
+        out(f"{ok}/{total} tests passed in {secs:.1f} s. {len(failed)} FAILED:", RED)
+        for label, why in failed:
+            out(f"  - {label}: {why}", RED)
+    else:
+        out(f"All {total} tests passed in {secs:.1f} s. Every command works, sir.", GREEN)
+    out("Maintenance finished: nothing of yours was changed. Back to normal operation.", GRAY)
     out()
 
 
