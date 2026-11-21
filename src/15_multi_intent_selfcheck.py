@@ -832,6 +832,7 @@ JV_UPD_ALLOW = (
     ("jv_web_get", "urllib"), ("jv_web_get", "ssl"),      # the one read-only https lookup (Wikipedia), online mode only
     ("steam_libraries", "winreg"),           # read-only: reads the Steam folder from the registry
     ("jv_watch_run", "subprocess.run"),      # screen watch: read-only qwinsta / netstat / tasklist
+    ("jv_watch_winapi", "ctypes"),           # screen watch shield: hide / show the windows of Firefox (user32 / kernel32)
     ("jv_watch_windows", "ctypes"),          # screen watch: reads the titles of the visible windows
     ("jv_watch_box_fallback", "ctypes"),     # screen watch: plain message box if the Tk window cannot open
     ("jv_watch_mail", "smtplib"), ("jv_watch_mail", "ssl"),   # screen watch: optional alert e-mail to YOU (SMTP over TLS)

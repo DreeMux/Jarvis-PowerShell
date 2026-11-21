@@ -1,4 +1,4 @@
-JARVIS POWERSHELL  -  modular version 3.1.0 (v2.5.4 + Screen Watch)
+JARVIS POWERSHELL  -  modular version 3.1.1 (v2.5.4 + Screen Watch)
 Author: DreeMux
 License: GNU GPL v3 or later (see LICENSE and NOTICE)
 
@@ -8,9 +8,7 @@ ask (updating itself, starting a game or a program, saving a report).
 HOW TO OPEN:   double-click START.bat     (Python 3 must be installed)
 
 WHAT'S NEW IN THIS VERSION
-  - Screen Watch: the "watch" command (Windows only).
-  - Always-on guard: "watch guard on".
-  - 22 modules (new: src\20_screen_watch.py).
+  - Firefox Shield: Firefox windows are hidden while someone is watching your screen.
 
 WHAT IS IN THE FOLDER:
   START.bat    one-click start: aligns the modules and opens Jarvis
@@ -50,3 +48,14 @@ ALWAYS-ON GUARD (works even when Jarvis is closed):  type  "watch guard on"  (on
   If Jarvis is open, Jarvis gives the warning (and pauses) and the guard stays silent: never two windows.
   Manage it:  watch guard | on | off (removes everything) | start | stop
   The file:  %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\JarvisScreenWatch.vbs
+
+FIREFOX SHIELD (new in 3.1.1):  while someone is watching your screen, the Firefox windows are HIDDEN at once
+  (every 0.3 s) and come back by themselves when the viewer leaves, or when Jarvis / the guard is closed.
+  It also works with the guard.
+  watch shield                    status (on by default)
+  watch shield hide | minimize | close | off     what to do (hide = hide the windows, minimize = minimize them,
+                                                 close = close them politely)
+  watch shield show               puts the hidden windows back at once (even if the guard has died)
+  watch shield add / del <program.exe>           other programs to protect (for example chrome.exe)
+  Limits: the viewer is noticed at the next check ("watch interval 2" = every 2 s), and a window opened while
+  someone is watching may be visible for a fraction of a second. Nothing is terminated by force.
