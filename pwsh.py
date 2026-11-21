@@ -1972,7 +1972,7 @@ def jv_open_request(orig, t, sel):
     if verb in ("launch", "start", "play", "run", "avvia", "avviami", "lancia", "lanciami", "esegui", "fai partire",
                 "fammi giocare a", "giocare a", "gioca a", "gioca"):
         # only a game of this PC, and only when spoken to Jarvis by name; anything else is not for this handler
-        return bool(CONTESTO.get("jv_named") and jv_launch_try(rest))
+        return bool(CONTESTO.get("jv_named") and (jv_launch_try(rest) or jv_launch_search(rest)))
     if verb in ("select", "choose", "pick", "use", "seleziona", "scegli"):
         mode = "select"
     elif verb in ("read", "leggi", "leggimi"):
@@ -2019,6 +2019,8 @@ def jv_open_request(orig, t, sel):
     if st == "none":
         if strict:
             return False
+        if mode == "open" and CONTESTO.get("jv_named") and jv_launch_search(rest):
+            return True
         cand = re.sub(r"\s+", " ", rest)
         jarvis_say(f"I can't find '{safe(cand)}', sir. I looked in this folder, three levels of sub-folders and your game folders.")
         close = difflib.get_close_matches(cand.lower(), [n.lower() for n in os.listdir(".")], n=3, cutoff=0.5)
@@ -4407,6 +4409,20 @@ def jv_launch_generic():
             subs = sorted(os.listdir(lib), key=str.lower)
         except OSError:
             continue
+        alts = {}                                         # Steam: install folder -> real game title
+        if os.path.basename(lib.rstrip("\\/")).lower() == "common":
+            sa = os.path.dirname(lib.rstrip("\\/"))
+            try:
+                for f in os.listdir(sa):
+                    if f.startswith("appmanifest_") and f.endswith(".acf"):
+                        with open(os.path.join(sa, f), encoding="utf-8", errors="replace") as fh:
+                            txt = fh.read(20000)
+                        d1 = re.search(r'"installdir"\s+"([^"]+)"', txt)
+                        n1 = re.search(r'"name"\s+"([^"]+)"', txt)
+                        if d1 and n1:
+                            alts[d1.group(1).lower()] = n1.group(1)
+            except OSError:
+                pass
         for n in subs:
             root = os.path.join(lib, n)
             if not os.path.isdir(root) or skip_dir(root) or n.lower().startswith(JV_LAUNCH_NOTGAME):
@@ -4415,16 +4431,17 @@ def jv_launch_generic():
             if key in res:
                 continue
             exes, winexe = [], False
+            alt = alts.get(n.lower(), "")
             base = root.rstrip(os.sep).count(os.sep)
             for cur, ds, _fs in os.walk(root, onerror=lambda e: None):
                 depth = cur.rstrip(os.sep).count(os.sep) - base
-                ds[:] = [] if depth >= 2 else sorted(d for d in ds if not skip_dir(os.path.join(cur, d)))
+                ds[:] = [] if depth >= 3 else sorted(d for d in ds if not skip_dir(os.path.join(cur, d)))
                 exes = jv_launch_exes(cur)
                 if exes:
                     break
             if exes:
-                best = jv_launch_best(exes, [n])
-                res[key] = {"name": n, "alt": "", "root": root, "wins": [], "dirs": [],
+                best = jv_launch_best(exes, [n, alt])
+                res[key] = {"name": n, "alt": alt, "root": root, "wins": [], "dirs": [],
                             "parts": [("launcher", best, None)], "winexe": False, "generic": True}
             elif os.name != "nt":
                 try:
@@ -4432,7 +4449,7 @@ def jv_launch_generic():
                 except OSError:
                     pass
                 if winexe:
-                    res[key] = {"name": n, "alt": "", "root": root, "wins": [], "dirs": [],
+                    res[key] = {"name": n, "alt": alt, "root": root, "wins": [], "dirs": [],
                                 "parts": [], "winexe": True, "generic": True}
     return res
 
@@ -4625,6 +4642,99 @@ def jv_launch_file(path):
     CONTESTO["file"] = full
     CONTESTO["jlast"] = {"path": full, "sel": full}
     out()
+
+
+JV_LAUNCH_NOSEARCH = r"(?:the\s+)?(?:scan|status|check|battery|memory|ram|search|find|update|test|everything|all|games?|corrupt)\b"
+
+
+def jv_launch_search(phrase, limit=60):
+    """Last resort for 'jarvis open <name>': look for a shortcut, a program or a game folder with that name
+    on the whole PC (Windows folder excluded) and open it. True when it handled the request."""
+    p = re.sub(r"\s+(?:please|pls|now|subito|ora|per favore)$", "", phrase.strip().strip("\"'`"), flags=re.I)
+    p = re.sub(r"^(?:(?:the|il|lo|la|my|mio|il mio|game|gioco|il gioco|the game)\s+)+", "", p, flags=re.I).strip()
+    n = jv_launch_norm(p)
+    if len(n) < 3 or len(p.split()) > 6 or re.match(JV_LAUNCH_NOSEARCH, p, re.I) or re.search(r"[\\/:]", p):
+        return False
+
+    def close(stem):
+        s = jv_launch_norm(stem)
+        if not s:
+            return False
+        if s == n or (len(n) >= 6 and n in s):
+            return True
+        if len(n) >= 5 and abs(len(s) - len(n)) <= 4:
+            sm = difflib.SequenceMatcher(None, s, n)
+            return sm.real_quick_ratio() >= 0.85 and sm.ratio() >= 0.85
+        return False
+
+    home = os.path.expanduser("~")
+    quick = []
+    if os.name == "nt":
+        for v in ("ProgramData", "APPDATA"):
+            if os.environ.get(v):
+                quick.append(os.path.join(os.environ[v], "Microsoft", "Windows", "Start Menu"))
+        quick += [os.path.join(home, "Desktop"), os.path.join(home, "OneDrive", "Desktop"),
+                  os.path.join(os.environ.get("PUBLIC", "C:\\Users\\Public"), "Desktop")]
+    win = os.path.normcase(os.environ.get("SystemRoot") or os.environ.get("windir") or "\x00")
+    jarvis_say(f"I don't know '{safe(p)}' yet, sir. Searching this PC for it (Ctrl+C stops me)...")
+    t0, found, stopped = time.time(), [], False
+
+    def scan(roots):
+        nonlocal stopped
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            for cur, ds, fs in os.walk(root, onerror=lambda e: None):
+                if time.time() - t0 > limit:
+                    stopped = True
+                    return
+                ds[:] = [d for d in ds if not skip_dir(os.path.join(cur, d))
+                         and os.path.normcase(os.path.join(cur, d)) != win
+                         and d.lower() not in ("$recycle.bin", "system volume information", "windowsapps")]
+                for d in ds:
+                    if close(d):
+                        found.append((2, os.path.join(cur, d)))
+                for f in fs:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext in (".lnk", ".url", ".exe") and close(os.path.splitext(f)[0]) \
+                            and not any(x in f.lower() for x in JV_LAUNCH_SKIP):
+                        found.append((0 if ext != ".exe" else 1, os.path.join(cur, f)))
+                if len(found) >= 12:
+                    return
+
+    try:
+        scan(quick)
+        if not found:
+            scan(pc_roots())
+    except KeyboardInterrupt:
+        out()
+        jarvis_say("Stopped, sir.")
+        return True
+    found = [x for x in found if jv_launch_blocked(x[1]) is None]
+    found.sort(key=lambda x: (x[0], len(x[1])))
+    for rank, path in found:
+        if rank in (0, 1) and os.path.isfile(path):
+            if rank == 1:
+                jv_launch_run({"name": os.path.splitext(os.path.basename(path))[0], "root": os.path.dirname(path),
+                               "wins": [], "generic": True}, ("launcher", path, None))
+            else:
+                jv_launch_file(path)
+            return True
+        if rank == 2 and os.path.isdir(path):
+            exes, base = [], path.rstrip(os.sep).count(os.sep)
+            for cur, ds, _fs in os.walk(path, onerror=lambda e: None):
+                ds[:] = [] if cur.rstrip(os.sep).count(os.sep) - base >= 3 else sorted(
+                    d for d in ds if not skip_dir(os.path.join(cur, d)))
+                exes = jv_launch_exes(cur)
+                if exes:
+                    break
+            best = jv_launch_best(exes, [os.path.basename(path), p])
+            if best:
+                jv_launch_run({"name": os.path.basename(path), "root": path, "wins": [], "generic": True},
+                              ("launcher", best, None))
+                return True
+    jarvis_say(f"I searched the whole PC and found nothing called '{safe(p)}'{' (time limit reached)' if stopped else ''}, sir.")
+    return True
 
 
 def jv_launch_try(rest):
