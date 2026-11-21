@@ -51,7 +51,7 @@ from datetime import datetime
 
 # ---------------- JARVIS DATA (only rewritten by 'implement jarvis' maintenance updates) ----------------
 # JV_DATA_BEGIN
-JV_DATA = {'version': 2, 'game_dirs': ['c:\\program files (x86)\\steam\\steamapps\\common\\DELTARUNEdemo'], 'updated': '2026-10-17 20:40'}
+JV_DATA = {'version': 1, 'game_dirs': [], 'updated': ''}
 # JV_DATA_END
 
 # ---------------- COLORI ORIGINALI (console Windows PowerShell) ----------------
@@ -1614,6 +1614,7 @@ def jarvis_greeting():
     jarvis_status("Current status")
     jarvis_say('Type "help" for commands, or just tell me what you need: '
                '"find my games", "scan this PC for corrupt files".')
+    jv_upd_show_report()
     out()
 
 
@@ -4033,6 +4034,99 @@ def jv_upd_countdown(work, incoming, why):
     jv_upd_restart(True)
 
 
+def jv_upd_changes(old_src, new_src):
+    """What really differs between two versions, computed from the two sources (nothing is guessed)."""
+    import ast
+    diff = [l for l in difflib.unified_diff(old_src.splitlines(), new_src.splitlines(), lineterm="", n=0)
+            if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+    add = sum(1 for l in diff if l[0] == "+")
+    rem = len(diff) - add
+    if not diff:
+        return ["No difference at all with the previous version."]
+    lines = [f"{add} line(s) added, {rem} line(s) removed."]
+
+    def top(src):
+        tree = ast.parse(src)
+        d, c = {}, {}
+        for n in tree.body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                d[n.name] = ast.dump(n)
+            elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+                c[n.targets[0].id] = ast.dump(n)
+        return tree, d, c
+
+    def show(label, names):
+        if names:
+            more = f" and {len(names) - 8} more" if len(names) > 8 else ""
+            lines.append(f"{label} ({len(names)}): {', '.join(names[:8])}{more}")
+    try:
+        ot, od, oc = top(old_src)
+        nt, nd, nc = top(new_src)
+    except (SyntaxError, ValueError):
+        return lines
+    show("Functions/classes added", sorted(set(nd) - set(od)))
+    show("Functions/classes removed", sorted(set(od) - set(nd)))
+    show("Functions/classes modified", sorted(k for k in od if k in nd and od[k] != nd[k]))
+    oc.pop("JV_DATA", None)
+    nc.pop("JV_DATA", None)
+    show("Constants added or changed", sorted(k for k in nc if oc.get(k) != nc[k]))
+    show("Constants removed", sorted(set(oc) - set(nc)))
+    on, _ = jv_upd_cmds(ot)
+    nn, _ = jv_upd_cmds(nt)
+    show("Commands added", sorted(nn - on))
+    show("Commands removed", sorted(on - nn))
+    e1, o_data = jv_upd_data_block(old_src)
+    e2, n_data = jv_upd_data_block(new_src)
+    if not e1 and not e2 and o_data != n_data:
+        gone = [d for d in o_data["game_dirs"] if d not in n_data["game_dirs"]]
+        new = [d for d in n_data["game_dirs"] if d not in o_data["game_dirs"]]
+        lines.append(f"Data block: version {o_data['version']} -> {n_data['version']}, "
+                     f"{len(new)} game folder(s) added, {len(gone)} removed.")
+        for d in new[:6]:
+            lines.append("  + " + d)
+        for d in gone[:6]:
+            lines.append("  - " + d)
+    return lines
+
+
+def jv_upd_save_report(label, backup):
+    """Right after an install: remember what changed, for the new window to tell."""
+    me = os.path.abspath(__file__)
+    try:
+        with open(backup, encoding="utf-8") as f:
+            old = f.read()
+        with open(me, encoding="utf-8") as f:
+            new = f.read()
+        rep = {"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "source": label, "backup": backup,
+               "old_sha": jv_upd_sha_of(backup), "new_sha": jv_upd_sha_of(me), "changes": jv_upd_changes(old, new)}
+        with open(os.path.join(jv_upd_sub("."), "last_update.json"), "w", encoding="utf-8") as f:
+            json.dump(rep, f)
+    except (OSError, ValueError, UnicodeDecodeError):
+        pass
+
+
+def jv_upd_show_report():
+    """At start: tell what the last update changed, once, and only if this file is exactly the one installed."""
+    path = os.path.join(jv_upd_dir(), "last_update.json")
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            rep = json.load(f)
+        same = rep["new_sha"] == jv_upd_sha_of(os.path.abspath(__file__))
+        lines = [str(x) for x in rep["changes"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        jv_upd_discard(path)
+        return
+    jv_upd_discard(path)
+    if not same:
+        return
+    jarvis_say(f"Update installed on {safe(rep.get('time', '?'))}. This is what really changed, sir:")
+    for ln in lines:
+        out("  " + safe(ln)[:200], CYAN)
+    out(f"  The previous version is saved in {safe(rep.get('backup', '?'))}", GRAY)
+
+
 # ---------------- implement jarvis ----------------
 @cmdlet("Implement", "Implement-Jarvis", group="Assistant", usage="""implement jarvis                      update myself: maintenance build with real data from this PC (or the file waiting in jarvis_update/incoming/)
 implement jarvis <file.py>           install that file as the new Jarvis
@@ -4167,6 +4261,7 @@ def jv_upd_cmd(args):
             out()
             return
         jv_upd_log(f"INSTALLED {label}; backup {backup}")
+        jv_upd_save_report(label, backup)
         jv_upd_discard(work, incoming)
         work = None
         out()
