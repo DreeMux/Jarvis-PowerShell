@@ -2229,6 +2229,7 @@ def jv_examples(t):
         ("DATES", 'how many days until christmas   |   what day is 25/12/2026   |   days between 1/1/2026 and 1/3/2026'),
         ("CHAT", 'jarvis perfect   |   yo big jarvis   |   tell me a joke   |   how are you   |   again (repeats my last request)'),
         ("ONLINE / RESEARCH", 'jarvis be online   |   jarvis search <topic>   |   jarvis cerca <topic>   |   jarvis go offline'),
+        ("CHROME (online)", 'jarvis open chrome then gmail on account anna   |   open chrome, youtube lofi and canva   |   apri chrome poi gmail con account paolo'),
         ("NEWS (online)", 'jarvis news   |   jarvis news war   |   jarvis notizie sulle proteste   (world stories in parts, photo + long summary)'),
         ("SECURITY / UPDATE", 'security   |   implement jarvis   |   implement jarvis -Dry   |   implement jarvis <file.py>   |   go in maintenance'),
     ]
@@ -5538,6 +5539,120 @@ def jv_news_cmd(orig, t):
     return True
 
 
+# ---------------- several things in ONE sentence: 'jarvis open chrome then gmail on account anna' ----------------
+# Splits the sentence into steps and hands each one to the browser mode above (jv_launch_browser), so every safety
+# rule stays there: only https pages, only while online, never files. All steps are checked BEFORE anything opens.
+JV_CHAIN_SPLIT = re.compile(r"\s*,?\s*\b(?:and then|and after that|then|after that|afterwards|next|e poi|e dopo|e quindi|poi|dopo|quindi)\b\s*"
+                            r"|\s+(?:and|e)\s+(?=(?:open|apri|search|cerca|go to|vai|launch|start|avvia)\b)", re.I)
+JV_CHAIN_ACCT = re.compile(r"\s+(?:(?:on|with|using|in|into|su|con|nel|nell'|sul|sull')\s+)?(?:the\s+|my\s+|il\s+|l')?"
+                           r"(?:account|profile|profilo)\s+(?:named\s+|called\s+|di\s+|of\s+|chiamato\s+)?(.+)$", re.I)
+JV_CHAIN_VERB = r"(?:open|launch|start|apri|avvia|lancia|go to|vai su|vai a|visit|switch to|use|usa)"
+
+
+def jv_chain_known(piece):
+    x = re.sub(r"^" + JV_CHAIN_VERB + r"\s+", "", piece.strip().lower())
+    x = re.sub(r"^(?:the|my|il|la|lo|i|le|mio|mia)\s+", "", x)
+    return x in JV_LAUNCH_SITES or x in JV_LAUNCH_SITE_ALIASES
+
+
+def jv_chain(orig, t):
+    """'jarvis open chrome then gmail on account anna', 'open chrome, gmail and canva', 'apri chrome poi youtube lofi':
+    several browser steps in one sentence. Needs 'jarvis be online'. Returns False when it is not such a sentence."""
+    br = CONTESTO.get("jv_browser")
+    if not (CONTESTO.get("jv_named") or br):
+        return False
+    s = re.sub(r"[\s.,;:!?]+$", "", t.strip())
+    s = re.sub(r"^(?:please|pls|per favore|ok|then|poi)[,\s]+", "", s)
+    s = re.sub(r"^(?:can|could|would) you(?: please)?\s+|^(?:puoi|potresti)\s+", "", s)
+    parts = [x.strip(" ,;") for x in JV_CHAIN_SPLIT.split(s) if x and x.strip(" ,;")]
+    if len(parts) < 2:
+        return False
+    chrome_re = re.compile(r"^(?:" + JV_CHAIN_VERB + r"\s+)?(?:google\s+)?chrome$", re.I)
+    items, started = [], bool(br)                     # ("chrome", account) / ("site", phrase, account)
+    for i, p in enumerate(parts):
+        acct = None
+        m = JV_CHAIN_ACCT.search(p)
+        if m:
+            acct = re.split(r"\s+(?:and|e)\s+", m.group(1).strip(), 1)[0].strip(" \"'`")
+            p = p[:m.start()].strip()
+        if not p:
+            return False
+        if chrome_re.match(p) and (i == 0 or started or p.lower().startswith(("open", "apri", "launch", "start", "avvia", "lancia"))):
+            started = True
+            items.append(("chrome", acct))
+            continue
+        if not started:
+            return False                              # the sentence does not begin with Chrome: not for me
+        pieces = [p]
+        sp = re.split(r"\s+(?:and|e)\s+", p)
+        if len(sp) > 1 and all(jv_chain_known(x) for x in sp):
+            pieces = sp
+        for piece in pieces:
+            piece = piece.strip()
+            if re.match(r"(?:search|google|cerca|cercami|look up)\b", piece):
+                phrase, rest = piece, piece
+            else:
+                rest = re.sub(r"^" + JV_CHAIN_VERB + r"\s+", "", piece).strip()
+                phrase = "open " + rest
+            low = rest.lower()
+            ext = low.rsplit(".", 1)[-1] if re.fullmatch(r"[^\s/]+\.[a-z0-9]{1,6}", low) else ""
+            if (not rest or ext in JV_LAUNCH_FILE_EXT or os.path.exists(rest) or re.search(r"[\\/]", low) and not low.startswith("http")
+                    or re.fullmatch(r"(?:it|this|that|them|\d{1,3})", low)):
+                return False                          # a file or a number of an old list: not a web page
+            items.append(("site", phrase.lower(), acct))
+    if not any(x[0] == "site" for x in items):
+        return False
+    CONTESTO["jv_nostore"] = True                     # 'again' must not reopen all the pages
+    if not CONTESTO.get("jv_online"):
+        jarvis_say("I only open Chrome and web pages while I'm online, sir. Say 'jarvis be online' first, then tell me again.")
+        return True
+    if not CONTESTO.get("jv_launch_dry") and not jv_launch_chrome_path():
+        jarvis_say("I can't find Chrome on this PC, sir. Is it installed?")
+        return True
+    for x in items:                                   # every step is checked BEFORE anything opens
+        if x[0] == "site":
+            url, why = jv_launch_web_target(x[1].split(" ", 1)[1] if x[1].startswith("open ") else x[1])
+            if not url or not jv_launch_url_ok(url):
+                jarvis_say(why if not url else "I won't open that address, sir.")
+                return True
+    queries = [x[-1] for x in items if x[-1]]
+    profs = jv_launch_chrome_profiles() if queries else []
+    found = {}
+    for q in dict.fromkeys(queries):
+        if not profs:
+            jarvis_say("I can't see any Chrome accounts, sir (Chrome keeps the list in its 'Local State' file). "
+                       "Open Chrome once and sign in. Nothing was opened.")
+            return True
+        hits = jv_launch_profile_match(q, profs)
+        if not hits:
+            jarvis_say(f"No Chrome account matches '{safe(q)}', sir. Say 'open chrome account' to see the list. Nothing was opened.")
+            return True
+        if len(hits) > 1:
+            jarvis_say(f"'{safe(q)}' fits more than one account, sir; say the number or the full name. Nothing was opened.")
+            for k, pr in enumerate(profs, 1):
+                if pr in hits:
+                    out(f"  [{k}] {safe(pr['name'])}" + (f"  <{safe(pr['email'])}>" if pr["email"] else ""))
+            return True
+        found[q] = hits[0]
+    cur = (br or {}).get("profile")
+    label = (br or {}).get("label")
+    if queries:                                       # one account named anywhere in the sentence is the starting one
+        cur, label = found[queries[0]]["dir"], found[queries[0]]["name"]
+    nsites = sum(1 for x in items if x[0] == "site")
+    jarvis_say(f"On it, sir: {nsites} page(s) in one go" + (f", account '{safe(label)}'" if label else "") + ".")
+    CONTESTO["jv_browser"] = {"profile": cur, "label": label}
+    for x in items:
+        if x[-1]:
+            cur, label = found[x[-1]]["dir"], found[x[-1]]["name"]
+        CONTESTO["jv_browser"] = {"profile": cur, "label": label}
+        if x[0] == "site":
+            jv_launch_browser(x[1], x[1])
+            if not CONTESTO.get("jv_launch_dry"):
+                time.sleep(0.7)                       # let Chrome take the pages in order
+    jarvis_say("Done, sir. Chrome mode stays on: say 'close chrome mode' when you are finished.")
+    return True
+
+
 def jv_interpret_core(texto):
     """Map a plain-language request (English or Italian) to a read-only command.
     Returns True if it understood and handled the request."""
@@ -5587,6 +5702,8 @@ def jv_interpret_core(texto):
     if jv_is_maintenance(t):           # "go in maintenance", "test all the commands"...
         jarvis_say("Entering maintenance mode, sir. I'm putting everything else on hold and testing every command.")
         jv_upd_maintenance_cmd([])
+        return True
+    if jv_chain(orig, t):              # several steps in one sentence: 'open chrome then gmail on account anna'
         return True
     if jv_launch_browser(orig, t):     # 'jarvis open chrome', then 'open email' / 'open canva' / 'open chrome account <name>'
         return True
@@ -5709,6 +5826,7 @@ def jarvis_interpret(texto):
   jarvis open data.win          opens it read-only (also: open the 2nd one, open undertale, read notes.txt, go up)
   jarvis open chrome            (online only) Chrome mode: then  open email / open canva / open youtube lofi / search <words>
                                 open pages in Chrome;  open chrome account <name or number>  picks the account;  close chrome mode  ends it
+  jarvis open chrome then gmail on account <name>   several steps in ONE sentence (online only; also: and, poi, e poi, dopo)
   jarvis open deltarune         STARTS the installed game (jarvis open deltarune chapter 2 picks a chapter)
   open deltarune                without 'jarvis': only shows the data.win read-only, never starts the game
   implement jarvis              update myself (see: help implement)       maintenance   health check
@@ -7291,6 +7409,24 @@ def jv_upd_selftest():
                 CONTESTO["jv_named"] = False
             print("ok")
         run("Chrome mode: needs online, then 'open email' / 'open canva', never takes file names, ends cleanly", convo)
+        def chain_test():
+            CONTESTO["jv_launch_dry"] = True
+            try:
+                CONTESTO.update(jv_online=True, jv_named=True, jv_browser=None)
+                if jv_chain("open a.txt then read it", "open a.txt then read it"):
+                    raise RuntimeError("a file sentence was taken for a browser chain")
+                if jv_chain("open chrome", "open chrome"):
+                    raise RuntimeError("a single step was taken for a chain")
+                for text in ("open chrome then gmail and canva", "apri chrome poi youtube lofi", "open chrome, then search cats",
+                             "open chrome then gmail on account zzzqqq"):
+                    if not jv_chain(text, text):
+                        raise RuntimeError(f"'{text}' was not handled")
+                CONTESTO["jv_online"] = False
+                if not jv_chain("open chrome then gmail", "open chrome then gmail"):
+                    raise RuntimeError("the offline case was not answered")
+            finally:
+                CONTESTO.update(jv_launch_dry=False, jv_browser=None, jv_online=False, jv_named=False)
+        run("several steps in one sentence: 'open chrome then gmail on account ...' (nothing is opened)", chain_test, need=["page(s) in one go", "online"])
 
         section("Update system (checks only, nothing is installed)")
         run("Get-SecurityStatus panel", cmd("Get-SecurityStatus"), need=["SECURITY STATUS", "FINGERPRINT", "CODE SCAN", "GUARD", "ISOLATION"])
