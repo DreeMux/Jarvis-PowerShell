@@ -4492,7 +4492,7 @@ def jv_typofix(texto):
 
 def jv_upd_log_miss(text):
     """Remember a sentence Jarvis did not understand (one line, in jarvis_update/unknown_phrases.log), so it can be taught."""
-    text = re.sub(r"\s+", " ", text).strip()[:200]
+    text = jv_upd_clean(text, 200)
     if not text or CONTESTO.get("jv_nolog"):
         return
     try:
@@ -4771,12 +4771,15 @@ JV_UPD_MAX_BYTES = 4 * 1024 * 1024
 JV_UPD_SECONDS = 10
 JV_UPD_PHASES = ("valid source", "checksum", "syntax", "data block", "security scan",
                  "updater intact", "commands kept", "start test", "start speed")
+JV_UPD_GUARD = "2.0 hardened"
 JV_UPD_PROTECTED = ("jv_upd_", "jv_launch_")
 JV_UPD_PROTECTED_CONST = ("JV_UPD_", "JV_LAUNCH_")
 JV_UPD_NET = ("urllib", "http", "ftplib", "smtplib", "telnetlib", "requests", "xmlrpc", "ssl", "poplib",
-              "imaplib", "paramiko", "websocket", "websockets", "aiohttp", "httpx", "socketserver", "asyncio")
+              "imaplib", "paramiko", "websocket", "websockets", "aiohttp", "httpx", "socketserver", "asyncio",
+              "cgi", "wsgiref", "selectors", "asyncore", "asynchat", "smtpd", "nntplib", "mailbox")
 JV_UPD_DYNAMIC = ("importlib", "pickle", "marshal", "shelve", "pty", "multiprocessing", "webbrowser",
-                  "code", "codeop", "builtins", "imp", "zipimport", "pkgutil")
+                  "code", "codeop", "builtins", "imp", "zipimport", "pkgutil", "winreg", "_winapi", "nt", "posix",
+                  "venv", "ensurepip", "zipapp", "py_compile", "compileall", "dbm", "pdb", "bdb")
 JV_UPD_BAD_BUILTINS = ("eval", "exec", "compile", "__import__", "breakpoint")
 JV_UPD_BAD_CALLS = (
     "os.remove", "os.unlink", "os.rmdir", "os.removedirs", "os.rename", "os.renames", "os.replace",
@@ -4786,18 +4789,47 @@ JV_UPD_BAD_CALLS = (
     "shutil.copytree", "shutil.copymode", "shutil.copystat", "shutil.make_archive", "shutil.unpack_archive",
     "shutil.chown", "sqlite3.connect", "runpy.run_path", "runpy.run_module", "tempfile.mkstemp",
     "tempfile.mkdtemp", "tempfile.NamedTemporaryFile", "tempfile.TemporaryDirectory",
+    "tempfile.SpooledTemporaryFile", "os.utime", "os.mkfifo", "os.mknod", "os.lchown", "os.lchmod",
+    "os.chflags", "os.lchflags", "os.chroot", "os.setxattr", "os.removexattr", "os.add_dll_directory",
+    "os.unsetenv", "os.environ.update", "os.environ.setdefault", "os.environ.pop", "os.environ.clear",
+    "logging.FileHandler", "logging.handlers.RotatingFileHandler", "logging.handlers.TimedRotatingFileHandler",
+    "logging.handlers.WatchedFileHandler", "fileinput.input", "fileinput.FileInput", "winreg.SetValueEx",
+    "winreg.SetValue", "winreg.CreateKey", "winreg.CreateKeyEx", "winreg.DeleteKey", "winreg.DeleteKeyEx",
+    "winreg.DeleteValue",
 )
+# things that are dangerous even when only mentioned (passed around, stored in a variable)
+JV_UPD_BAD_SYS = ("sys.modules", "sys._getframe", "sys.settrace", "sys.setprofile", "sys.addaudithook",
+                  "sys.meta_path", "sys.path_hooks", "sys.setdlopenflags")
+JV_UPD_BAD_DUNDERS = ("__subclasses__", "__globals__", "__builtins__", "__code__", "__closure__",
+                      "__getattribute__", "__bases__", "__mro__", "__loader__", "__spec__", "__reduce__",
+                      "__reduce_ex__")
+# names a getattr()/setattr() must never reach for by string
+JV_UPD_BAD_ATTRS = ("remove", "unlink", "rmdir", "rmtree", "system", "popen", "startfile", "kill", "rename",
+                    "replace", "chmod", "chown", "truncate", "mkdir", "makedirs", "write_text", "write_bytes",
+                    "extractall", "extract", "run", "Popen", "call", "check_call", "check_output", "putenv",
+                    "environ", "modules", "eval", "exec", "compile", "__import__", "__builtins__", "__globals__")
+# only these variables are handed to the throw-away start test (no tokens, keys or passwords)
+JV_UPD_ENV_KEEP = ("PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR",
+                   "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+                   "PROGRAMFILES", "PROGRAMFILES(X86)", "USERNAME", "LANG", "LC_ALL", "TERM", "COLORTERM",
+                   "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS")
+# characters that make source code read differently from what it does ("Trojan Source") or hide in it
+JV_UPD_HIDDEN = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\u00ad\ufff9-\ufffb]")
+JV_UPD_ALIAS_ROOTS = ("os", "sys", "shutil", "subprocess", "pathlib", "tempfile", "runpy", "sqlite3", "ctypes",
+                      "socket", "io", "codecs", "gzip", "bz2", "lzma", "tarfile", "zipfile", "logging", "fileinput")
 JV_UPD_BAD_PREFIX = ("subprocess.", "os.exec", "os.spawn", "os.posix_spawn")
 JV_UPD_BAD_METHODS = ("write_text", "write_bytes", "unlink", "rmdir", "mkdir", "touch", "symlink_to",
-                      "hardlink_to", "chmod", "rmtree", "removedirs", "makedirs")
+                      "hardlink_to", "chmod", "rmtree", "removedirs", "makedirs", "extractall", "extract",
+                      "rename", "truncate")
 JV_UPD_OPENERS = ("open", "io.open", "codecs.open", "gzip.open", "bz2.open", "lzma.open", "tarfile.open",
-                  "zipfile.ZipFile", "ZipFile", "os.fdopen")
+                  "zipfile.ZipFile", "ZipFile", "os.fdopen", "io.FileIO", "FileIO")
 JV_UPD_MODULES = ("os", "shutil", "sys", "subprocess", "builtins")
 # (function, thing) pairs that the existing, read-only code is allowed to do.
 JV_UPD_ALLOW = (
     ("pc_roots", "ctypes"), ("system_memory", "ctypes"), ("battery_info", "ctypes"), ("jv_uptime", "ctypes"),
     ("battery_info", "subprocess.run"), ("jv_global", "socket"), ("sqlite_open_ro", "sqlite3.connect"),
     ("carica_estensioni", "runpy.run_path"), ("main", "os.system"),
+    ("steam_libraries", "winreg"),           # read-only: reads the Steam folder from the registry
 )
 JV_LAUNCH_SKIP = ("unins", "uninstall", "setup", "install", "redist", "vcredist", "dxsetup", "crash", "report",
                   "helper", "updater", "update", "dotnet", "directx", "vc_", "oalinst", "cleanup", "config")
@@ -4815,10 +4847,20 @@ def jv_upd_sub(name):
     return d
 
 
+def jv_upd_clean(text, limit=300):
+    """One safe line: no line breaks, escape codes or hidden characters (nothing can fake a log entry)."""
+    t = JV_UPD_HIDDEN.sub(" ", str(text))
+    t = "".join(c if c.isprintable() else " " for c in t)
+    return re.sub(r"\s+", " ", t).strip()[:limit]
+
+
 def jv_upd_log(msg):
     try:
-        with open(os.path.join(jv_upd_sub("."), "update.log"), "a", encoding="utf-8") as f:
-            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n")
+        path = os.path.join(jv_upd_sub("."), "update.log")
+        if os.path.isfile(path) and os.path.getsize(path) > 1_000_000:
+            os.replace(path, path + ".1")          # one old generation is kept, the log never grows without limit
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {jv_upd_clean(msg, 600)}\n")
     except OSError:
         pass
 
@@ -4862,18 +4904,20 @@ def jv_upd_data_block(src):
 # ---------------- security scan ----------------
 def jv_upd_scan(tree):
     """Violations found outside the protected updater/launcher code. A safety net against mistakes
-    and clumsy code, NOT a guarantee against deliberately hostile code."""
+    and clumsy code, NOT a guarantee against deliberately hostile code. It follows aliases
+    (import os as o / x = os.remove), catches dangerous functions even when only mentioned, and blocks the
+    usual ways out of a checker (dunder tricks, dynamic getattr, sys.modules, writes through Path.open)."""
     import ast
     found = []
     seen = set()
 
-    def dotted(n):
+    def dotted(n, alias):
         parts = []
         while isinstance(n, ast.Attribute):
             parts.append(n.attr)
             n = n.value
         if isinstance(n, ast.Name):
-            parts.append(n.id)
+            parts.append(alias.get(n.id, n.id))
             return ".".join(reversed(parts))
         return None
 
@@ -4885,16 +4929,28 @@ def jv_upd_scan(tree):
             seen.add(tag)
             found.append(f"line {getattr(node, 'lineno', '?')}: {text} (in {owner})")
 
+    alias = {}
+    for node in ast.walk(tree):                              # pass 1, whole file: who is called what
+        if isinstance(node, ast.Import):
+            for a_ in node.names:
+                if a_.asname:
+                    alias[a_.asname] = a_.name
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            v = dotted(node.value, alias) if isinstance(node.value, (ast.Name, ast.Attribute)) else None
+            if v and v.split(".")[0] in JV_UPD_ALIAS_ROOTS:
+                alias[node.targets[0].id] = v
     for top in tree.body:
         owner = top.name if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else "<module>"
         if owner.startswith(JV_UPD_PROTECTED):
             continue
-        for node in ast.walk(top):
+        nodes = list(ast.walk(top))
+        callfuncs = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
+        for node in nodes:                                   # pass 2: what is done
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 if isinstance(node, ast.ImportFrom) and node.level:
                     flag(owner, node, "relative-import", "relative import")
                     continue
-                mods = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+                mods = [a_.name for a_ in node.names] if isinstance(node, ast.Import) else [node.module or ""]
                 for m in mods:
                     root = m.split(".")[0]
                     if root in JV_UPD_NET:
@@ -4905,19 +4961,38 @@ def jv_upd_scan(tree):
                         flag(owner, node, root, f"import of '{root}'")
                     elif isinstance(node, ast.ImportFrom) and root in ("os", "shutil", "subprocess", "runpy", "sqlite3"):
                         flag(owner, node, root, f"'from {root} import ...'")
-            elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-                if node.value.id == "ctypes":
-                    flag(owner, node, "ctypes", "use of ctypes")
-                elif node.value.id == "socket" and node.attr != "gethostname":
-                    flag(owner, node, "socket", f"socket.{node.attr}")
+            elif isinstance(node, ast.Attribute):
+                if isinstance(node.value, ast.Name):
+                    base = alias.get(node.value.id, node.value.id)
+                    if base == "ctypes":
+                        flag(owner, node, "ctypes", "use of ctypes")
+                    elif base == "socket" and node.attr != "gethostname":
+                        flag(owner, node, "socket", f"socket.{node.attr}")
+                if node.attr in JV_UPD_BAD_DUNDERS:
+                    flag(owner, node, node.attr, f"use of .{node.attr}")
+                name = dotted(node, alias)
+                if name in JV_UPD_BAD_SYS:
+                    flag(owner, node, name, f"use of {name}")
+                elif name in JV_UPD_BAD_CALLS and id(node) not in callfuncs:
+                    flag(owner, node, name, f"{name} passed around without being called here")
+            elif isinstance(node, ast.Subscript):
+                if isinstance(node.ctx, (ast.Store, ast.Del)) and dotted(node.value, alias) == "os.environ":
+                    flag(owner, node, "os.environ", "change of os.environ")
             elif isinstance(node, ast.Call):
                 f = node.func
-                name = dotted(f)
+                name = dotted(f, alias)
                 if isinstance(f, ast.Name) and f.id in JV_UPD_BAD_BUILTINS:
                     flag(owner, node, f.id, f"{f.id}()")
-                if isinstance(f, ast.Name) and f.id in ("getattr", "setattr", "delattr") and node.args \
-                        and isinstance(node.args[0], ast.Name) and node.args[0].id in JV_UPD_MODULES:
-                    flag(owner, node, "getattr", f"{f.id}() on module '{node.args[0].id}'")
+                if isinstance(f, ast.Name) and f.id in ("getattr", "setattr", "delattr"):
+                    if node.args and isinstance(node.args[0], ast.Name) \
+                            and alias.get(node.args[0].id, node.args[0].id).split(".")[0] in JV_UPD_MODULES:
+                        flag(owner, node, "getattr", f"{f.id}() on module '{node.args[0].id}'")
+                    if len(node.args) > 1:
+                        an = node.args[1]
+                        if not (isinstance(an, ast.Constant) and isinstance(an.value, str)):
+                            flag(owner, node, "getattr-dynamic", f"{f.id}() with a computed attribute name")
+                        elif an.value in JV_UPD_BAD_ATTRS or an.value in JV_UPD_BAD_DUNDERS:
+                            flag(owner, node, "getattr-bad", f"{f.id}() reaching for '{an.value}'")
                 for kw in node.keywords:
                     if kw.arg == "shell" and not (isinstance(kw.value, ast.Constant) and kw.value.value is False):
                         flag(owner, node, "shell", "shell=...")
@@ -4931,6 +5006,19 @@ def jv_upd_scan(tree):
                             flag(owner, node, "open-mode", f"{name}() with a non-literal mode")
                         elif any(c in mode.value for c in "wax+"):
                             flag(owner, node, "open-write", f"{name}() opened for writing")
+                elif isinstance(f, ast.Attribute) and f.attr == "open":          # Path.open('w'), anything.open(mode=...)
+                    mode = None
+                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str) \
+                            and re.fullmatch(r"[rwxabt+U]{1,4}", node.args[0].value):
+                        mode = node.args[0]
+                    for kw in node.keywords:
+                        if kw.arg == "mode":
+                            mode = kw.value
+                    if mode is not None:
+                        if not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)):
+                            flag(owner, node, "open-mode", ".open() with a non-literal mode")
+                        elif any(c in mode.value for c in "wax+"):
+                            flag(owner, node, "open-write", ".open() opened for writing")
                 if name in JV_UPD_BAD_CALLS:
                     if name == "os.system" and node.args and isinstance(node.args[0], ast.Constant) \
                             and node.args[0].value == "":
@@ -4979,12 +5067,12 @@ def jv_upd_cmds(tree):
 # ---------------- running a candidate in a throw-away folder ----------------
 def jv_upd_run(path, cwd, stdin_text, limit=20):
     import subprocess
-    env = dict(os.environ)
+    env = {k: v for k, v in os.environ.items() if k.upper() in JV_UPD_ENV_KEEP}      # no tokens, keys or passwords
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
     t0 = time.perf_counter()
     try:
-        r = subprocess.run([sys.executable, path], input=stdin_text, capture_output=True, text=True,
+        # -I: isolated mode (ignores PYTHON* variables, the user's site folder and the script folder on the path)
+        r = subprocess.run([sys.executable, "-I", "-B", "-X", "utf8", path], input=stdin_text, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=limit, cwd=cwd, env=env)
     except subprocess.TimeoutExpired:
         return None, "", f"did not finish in {limit} s", float(limit)
@@ -5011,7 +5099,7 @@ def jv_upd_phase(i, ok, detail=""):
     return ok
 
 
-def jv_upd_check(cand, want_sha):
+def jv_upd_check(cand, want_sha, pin=None):
     """The 9 safety phases, in order. Returns (ok, phase name, reason). Installs nothing."""
     import ast
     import tempfile
@@ -5023,6 +5111,8 @@ def jv_upd_check(cand, want_sha):
 
     # 1 - valid source
     try:
+        if not stat.S_ISREG(os.lstat(cand).st_mode):
+            return bad(1, "not a plain file (a link, pipe or device)")
         with open(cand, "rb") as f:
             raw = f.read(JV_UPD_MAX_BYTES + 1)
     except OSError as e:
@@ -5035,11 +5125,16 @@ def jv_upd_check(cand, want_sha):
         src = raw.decode("utf-8")
     except UnicodeDecodeError:
         return bad(1, "not valid UTF-8 text")
+    hid = JV_UPD_HIDDEN.search(src[1:] if src.startswith("\ufeff") else src)
+    if hid:
+        return bad(1, f"hidden or direction-changing character U+{ord(hid.group()):04X} in the text")
     if "def main(" not in src or "__main__" not in src:
         return bad(1, "not a Jarvis program (no main)")
     jv_upd_phase(1, True, human(len(raw)))
     # 2 - checksum
     digest = hashlib.sha256(raw).hexdigest()
+    if pin and digest != pin.lower():
+        return bad(2, "the file changed after it was staged")
     if want_sha:
         if digest != want_sha.lower():
             return bad(2, f"sha256 is {digest[:16]}..., expected {want_sha.lower()[:16]}...")
@@ -5118,16 +5213,31 @@ def jv_upd_check(cand, want_sha):
 
 # ---------------- sources ----------------
 def jv_upd_fetch(url):
-    """Download a source (https only; plain http only for this computer). Returns bytes or raises ValueError."""
+    """Download a source (https only, also after redirects; TLS 1.2 or newer; plain http only for this computer).
+    Returns bytes or raises ValueError."""
+    import ssl
+    import urllib.error
     import urllib.parse
     import urllib.request
     p = urllib.parse.urlparse(url)
-    local = (p.hostname or "") in ("localhost", "127.0.0.1", "::1")
+    here = ("localhost", "127.0.0.1", "::1")
+    local = (p.hostname or "") in here
     if p.scheme != "https" and not (p.scheme == "http" and local):
         raise ValueError("only https:// links are accepted")
+
+    class Strict(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            q = urllib.parse.urlparse(newurl)
+            if q.scheme != "https" and not (q.scheme == "http" and local and (q.hostname or "") in here):
+                raise urllib.error.HTTPError(newurl, code, "redirect to a non-https address refused", headers, fp)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    opener = urllib.request.build_opener(Strict, urllib.request.HTTPSHandler(context=ctx))
     req = urllib.request.Request(url, headers={"User-Agent": "JARVIS-updater"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with opener.open(req, timeout=15) as r:
             data = r.read(JV_UPD_MAX_BYTES + 1)
     except OSError as e:
         raise ValueError(f"download failed ({e})")
@@ -5138,10 +5248,16 @@ def jv_upd_fetch(url):
 
 def jv_upd_stage(raw, name):
     """Put the candidate in jarvis_update/work/ (the checks always run on this private copy)."""
-    path = os.path.join(jv_upd_sub("work"), f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{jv_upd_safe_name(name)}")
-    with open(path, "wb") as f:
-        f.write(raw)
-    return path
+    base = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{jv_upd_safe_name(name)}"
+    for n in range(100):
+        path = os.path.join(jv_upd_sub("work"), base if n == 0 else f"{n}_{base}")
+        try:
+            with open(path, "xb") as f:          # exclusive: never writes through an existing file or link
+                f.write(raw)
+            return path
+        except FileExistsError:
+            continue
+    raise OSError("cannot make a private copy of the update")
 
 
 def jv_upd_build_maintenance(cur_src, cur_data):
@@ -5173,9 +5289,12 @@ def jv_upd_sha_of(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def jv_upd_install(cand):
-    """Backup the running file, put the candidate in its place, roll back on any trouble. Returns the backup path."""
+def jv_upd_install(cand, pin=None):
+    """Backup the running file, put the candidate in its place, roll back on any trouble. Returns the backup path.
+    With pin (the SHA-256 seen by the checks) it refuses a file that changed after the checks."""
     me = os.path.abspath(__file__)
+    if pin and jv_upd_sha_of(cand) != pin.lower():
+        raise OSError("the update changed after it was checked, nothing was installed")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup = os.path.join(jv_upd_sub("backups"), f"{os.path.splitext(os.path.basename(me))[0]}_{stamp}.py")
     shutil.copy2(me, backup)
@@ -5185,7 +5304,10 @@ def jv_upd_install(cand):
     want = jv_upd_sha_of(cand)
     tmp = me + ".jvnew"
     try:
-        shutil.copyfile(cand, tmp)
+        with open(cand, "rb") as s_, open(tmp, "wb") as d_:
+            shutil.copyfileobj(s_, d_)
+            d_.flush()
+            os.fsync(d_.fileno())              # on the disk before it replaces the running file
         if jv_upd_sha_of(tmp) != want:
             raise OSError("the new file was not copied correctly")
         os.replace(tmp, me)
@@ -5420,6 +5542,8 @@ All passed: the old file is copied to jarvis_update/backups/, the new one is ins
 rollback on any trouble) and Jarvis restarts. One failed: nothing is installed, then type  delete
 within 10 seconds to discard it and keep this window; no answer = this session closes, the update goes
 to jarvis_update/rejected/ and a fresh Jarvis opens.
+Downloads: https only (also after redirects), TLS 1.2+, and always with -Sha256. The start test runs isolated
+(python -I) with a cleaned environment. A file that changes after the checks is refused at install time.
 (Only install updates from sources you trust: the scan catches mistakes, not deliberately hostile code.)""")
 def jv_upd_cmd(args):
     """Update Jarvis itself: 9 safety checks, backup, automatic rollback."""
@@ -5518,11 +5642,12 @@ def jv_upd_cmd(args):
             out(f"Cannot get the update: {e}. Nothing was done.", RED)
             out()
             return
+        pin = jv_upd_sha_of(work)
         out()
         jv_upd_box("SECURITY GATE // PATCH VERIFICATION")
         out(f"[*] source : {safe(label)}", JV_SEC_D)
         out(f"[*] running the {len(JV_UPD_PHASES)} safety checks (a single failure blocks the patch)", JV_SEC_D)
-        ok, phase, why = jv_upd_check(work, sha)
+        ok, phase, why = jv_upd_check(work, sha, pin)
         if not ok:
             if dry:
                 out(f"Dry run: this update would be REFUSED at '{phase}'. Nothing was installed.", RED)
@@ -5537,7 +5662,7 @@ def jv_upd_cmd(args):
             out()
             return
         try:
-            backup = jv_upd_install(work)
+            backup = jv_upd_install(work, pin)
         except OSError as e:
             jv_upd_log(f"INSTALL FAILED, rolled back: {e}")
             out(f"The installation failed and the old version is back in place: {e}", RED)
@@ -5608,6 +5733,10 @@ def jv_upd_health(args):
     row(not found, "CODE SCAN", "0 violations" if not found else f"{len(found)} violation(s), first: {found[0]}")
     prot = jv_upd_protected(tree)
     row(True, "PROTECTED", f"{len(prot)} updater/launcher item(s) locked: an update that changes them is refused")
+    rules = (len(JV_UPD_NET) + len(JV_UPD_DYNAMIC) + len(JV_UPD_BAD_BUILTINS) + len(JV_UPD_BAD_CALLS)
+             + len(JV_UPD_BAD_METHODS) + len(JV_UPD_BAD_SYS) + len(JV_UPD_BAD_DUNDERS))
+    row(True, "GUARD", f"v{JV_UPD_GUARD}: {rules} scan rules, alias tracking, hidden-character and link/pipe refusal, pinned install")
+    row(True, "ISOLATION", "start test: python -I, cleaned environment, 10 s limit; downloads: https only, TLS 1.2+")
     row(True, "PATCH GATES", " > ".join(JV_UPD_PHASES))
     base = jv_upd_dir()
 
@@ -5995,11 +6124,76 @@ def jv_upd_selftest():
             ("launcher", os.path.join(tmp, "a.txt"), None)), need=["I won't start"])
 
         section("Update system (checks only, nothing is installed)")
-        run("Get-SecurityStatus panel", cmd("Get-SecurityStatus"), need=["SECURITY STATUS", "FINGERPRINT", "CODE SCAN"])
+        run("Get-SecurityStatus panel", cmd("Get-SecurityStatus"), need=["SECURITY STATUS", "FINGERPRINT", "CODE SCAN", "GUARD", "ISOLATION"])
         cand = os.path.join(tmp, "jarvis_candidate.py")
         shutil.copyfile(os.path.abspath(__file__), cand)      # the running Jarvis as a candidate: all 9 checks must pass
         run("implement jarvis <copy of myself> -Dry (all 9 safety checks)", cmd("Implement", "jarvis", cand, "-Dry"),
             need=["SECURITY GATE", "9/9 gates passed"], bad=["would be REFUSED", "BLOCKED"], red=False)
+
+        section("Security guard (the scanner must catch the classic tricks; nothing is executed or installed)")
+        import ast as _ast
+
+        def scan_blocks(code, want):
+            def f():
+                got = jv_upd_scan(_ast.parse(code))
+                if not got:
+                    raise RuntimeError("the scanner let it through")
+                if want not in " ".join(got):
+                    raise RuntimeError(f"flagged, but not as expected: {got[0]}")
+                print(got[0])
+            return f
+        tricks = (
+            ("import os as o ... o.remove()", "import os as o\ndef f(p):\n    o.remove(p)\n", "os.remove"),
+            ("rm = shutil.rmtree ... rm()", "import shutil\nrm = shutil.rmtree\ndef f(p):\n    rm(p)\n", "shutil.rmtree"),
+            ("map(os.remove, files)", "import os\ndef f(l):\n    list(map(os.remove, l))\n", "os.remove"),
+            ("getattr(os, 'rem' + 'ove')", "import os\ndef f():\n    getattr(os, 'rem' + 'ove')('x')\n", "computed attribute"),
+            ("getattr(x, 'system')", "def f(x):\n    getattr(x, 'system')('y')\n", "system"),
+            ("__subclasses__ escape", "def f():\n    return ().__class__.__bases__[0].__subclasses__()\n", "__"),
+            ("Path('a').open('w')", "import pathlib\ndef f():\n    pathlib.Path('a').open('w')\n", "opened for writing"),
+            ("os.environ['A'] = ...", "import os\ndef f():\n    os.environ['A'] = '1'\n", "os.environ"),
+            ("sys.modules['os']", "import sys\ndef f():\n    return sys.modules['os']\n", "sys.modules"),
+            ("zip.extractall()", "def f(z):\n    z.extractall('.')\n", "extractall"),
+            ("import subprocess as sp", "import subprocess as sp\ndef f():\n    sp.run(['x'])\n", "subprocess.run"),
+            ("import socket as s ... s.socket()", "import socket as s\ndef f():\n    return s.socket()\n", "socket"),
+            ("winreg write", "import winreg\ndef f():\n    winreg.SetValueEx(1, 'a', 0, 1, 'b')\n", "winreg"),
+        )
+        for label, code, want in tricks:
+            run(f"scanner blocks: {label}", scan_blocks(code, want))
+
+        def harmless():
+            code = ("import os\nimport re\n"
+                    "def f(p):\n    with open(p, 'rb') as h:\n"
+                    "        return re.sub('a', 'b', h.read().decode()) + str(os.path.getsize(p)) + os.environ.get('X', '')\n"
+                    "def g(o):\n    return getattr(o, 'st_birthtime', None)\n")
+            got = jv_upd_scan(_ast.parse(code))
+            if got:
+                raise RuntimeError("false alarm: " + got[0])
+            print("read-only code passes")
+        run("scanner lets normal read-only code through", harmless)
+
+        def candidate_with(text, name, **kw):
+            path = os.path.join(tmp, name)
+            with open(os.path.abspath(__file__), "rb") as s_, open(path, "wb") as d_:
+                d_.write(s_.read() + text)
+            return path
+        hidden = candidate_with("\n# access \u202eevil\u202c\n".encode("utf-8"), "cand_hidden.py")
+        run("a hidden direction-change character is refused (check 1)", lambda: jv_upd_check(hidden, None),
+            need=["BLOCKED", "U+202E"], red=True)
+        run("a file that changed after staging is refused (check 2)", lambda: jv_upd_check(cand, None, "0" * 64),
+            need=["BLOCKED", "changed after"], red=True)
+        link = os.path.join(tmp, "cand_link.py")
+
+        def linked():
+            try:
+                os.symlink(cand, link)
+            except (OSError, NotImplementedError, AttributeError):
+                print("(this system does not allow links here: skipped)")
+                return
+            jv_upd_check(link, None)
+        run("a link instead of a plain file is refused (check 1)", linked, need=["BLOCKED"], red=True)
+        run("log lines cannot be forged or carry escape codes", lambda: print(
+            "clean" if jv_upd_clean("a\nb\x1b[31m c\u202e") == "a b [31m c" else (_ for _ in ()).throw(
+                RuntimeError(repr(jv_upd_clean("a\nb\x1b[31m c\u202e"))))))
 
         exts = [n for n in NOMI if GROUPS.get(n) == "Extensions"]
         if exts:
