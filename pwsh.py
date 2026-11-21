@@ -23,6 +23,7 @@ Everything here is READ-ONLY: nothing of yours is ever written, moved or deleted
 ask for explicitly go further: "implement jarvis" (updates this very file, after 9 safety checks and
 with a backup), "jarvis open <game>" (starts the game's own program) and "extract.key" (saves a NEW
 report file in Downloads). I also keep a list of sentences I did not understand (jarvis_update/).
+Online only: 'jarvis open chrome' starts Chrome mode ('open email', 'open canva', 'open chrome account <name>'): it only opens https pages.
 While online (jarvis be online): 'jarvis search <topic>' also asks Wikipedia (https, only the search words are sent), and
 'jarvis news' reads the RSS feeds of Italian and international desks (https, read-only; photos need Pillow).
 Optional: pip install psutil  (live memory/CPU of a running game in pluton.key).
@@ -3409,7 +3410,8 @@ JV_SUGGEST = ["find my games", "scan this PC for corrupt files", "open <file>", 
               "what time is it", "go in maintenance", "implement jarvis", "examples", "what is a dll",
               "calculate 15% of 80", "convert 5 km to miles", "how many days until christmas", "tell me a joke",
               "what does dir do", "tell me about undertale", "security status", "again", "what didn't you understand",
-              "be online", "cerca <topic>", "go offline", "news", "news war"]
+              "be online", "cerca <topic>", "go offline", "news", "news war",
+              "open chrome", "open chrome account", "open email", "open canva", "close chrome mode"]
 
 
 def jv_pick(*opts):
@@ -5573,6 +5575,8 @@ def jv_interpret_core(texto):
         jarvis_say("Entering maintenance mode, sir. I'm putting everything else on hold and testing every command.")
         jv_upd_maintenance_cmd([])
         return True
+    if jv_launch_browser(orig, t):     # 'jarvis open chrome', then 'open email' / 'open canva' / 'open chrome account <name>'
+        return True
     if jv_know(orig, t):               # maths, conversions, dates, glossary, commands, games
         return True
     if jv_deep(orig, t, sel):          # specific questions about files/folders + opening files
@@ -5690,6 +5694,8 @@ def jarvis_interpret(texto):
   jarvis select data.win        then:  jarvis tell me about it / what's inside / how much battery
   jarvis status
   jarvis open data.win          opens it read-only (also: open the 2nd one, open undertale, read notes.txt, go up)
+  jarvis open chrome            (online only) Chrome mode: then  open email / open canva / open youtube lofi / search <words>
+                                open pages in Chrome;  open chrome account <name or number>  picks the account;  close chrome mode  ends it
   jarvis open deltarune         STARTS the installed game (jarvis open deltarune chapter 2 picks a chapter)
   open deltarune                without 'jarvis': only shows the data.win read-only, never starts the game
   implement jarvis              update myself (see: help implement)       maintenance   health check
@@ -7153,6 +7159,84 @@ def jv_upd_selftest():
             {"name": "test", "root": sub, "wins": [], "generic": True},
             ("launcher", os.path.join(tmp, "a.txt"), None)), need=["I won't start"])
 
+        section("Browser mode (nothing is started: only checked)")
+        def urlsafety():
+            good = ["https://mail.google.com/", "https://www.canva.com/design?x=1"]
+            bad = ["http://a.com", "https://localhost/", "https://127.0.0.1/", "https://10.0.0.5/", "https://a.com:8080/",
+                   "https://user:pw@evil.com/", "javascript:alert(1)", "file:///C:/Windows/win.ini", "https://a.com/ x",
+                   "https://x.local/", "chrome://settings", "data:text/html,hi", "https://a.com/\"onload=1"]
+            for u in good:
+                if not jv_launch_url_ok(u):
+                    raise RuntimeError(f"a normal address was refused: {u}")
+            for u in bad:
+                if jv_launch_url_ok(u):
+                    raise RuntimeError(f"an unsafe address was accepted: {u}")
+            for phrase in ("javascript:alert(1)", "file:///C:/x", "chrome://settings", "data:text/html,hi", "https://u:p@evil.com"):
+                if jv_launch_web_target(phrase)[0]:
+                    raise RuntimeError(f"'{phrase}' would have been opened")
+            print(f"{len(good)} normal and {len(bad)} unsafe addresses checked")
+        run("only plain https pages are ever opened", urlsafety)
+        def targets():
+            want = {"email": "https://mail.google.com/", "my email": "https://mail.google.com/", "canva": "https://www.canva.com/",
+                    "youtube lofi music": "https://www.youtube.com/results?search_query=lofi+music",
+                    "search best pizza": "https://www.google.com/search?q=best+pizza", "example.com": "https://example.com",
+                    "http://example.com": "https://example.com", "maps colosseo": "https://www.google.com/maps/search/colosseo"}
+            for phrase, url in want.items():
+                got = jv_launch_web_target(phrase)[0]
+                if got != url:
+                    raise RuntimeError(f"'{phrase}' gave {got}, expected {url}")
+            print(f"{len(want)} phrases map to the right page")
+        run("'email', 'canva', 'youtube <words>', 'search <words>' find the right page", targets)
+        def profiles():
+            d = os.path.join(tmp, "chrome")
+            os.makedirs(d)
+            sp = os.path.join(d, "Local State")
+            with open(sp, "w", encoding="utf-8") as f:
+                json.dump({"profile": {"info_cache": {"Default": {"name": "Anna", "user_name": "anna@example.com"},
+                                                      "Profile 1": {"name": "Work", "user_name": "w@example.org"},
+                                                      "../evil": {"name": "x"}}}}, f)
+            ps = jv_launch_chrome_profiles(sp)
+            if [p["dir"] for p in ps] != ["Default", "Profile 1"]:
+                raise RuntimeError(f"profiles read wrongly: {ps}")
+            for q, dirn in (("anna", "Default"), ("work", "Profile 1"), ("w@example.org", "Profile 1"), ("2", "Profile 1"), ("annna", "Default")):
+                got = jv_launch_profile_match(q, ps)
+                if [p["dir"] for p in got] != [dirn]:
+                    raise RuntimeError(f"'{q}' matched {[p['dir'] for p in got]}, expected {dirn}")
+            if jv_launch_profile_match("zzzz", ps):
+                raise RuntimeError("an unknown name matched an account")
+            print("2 accounts read, an unsafe folder name ignored, names/emails/numbers/typos matched")
+        run("Chrome accounts are read and matched (from a sample file)", profiles)
+        def convo():
+            CONTESTO["jv_launch_dry"] = True
+            try:
+                CONTESTO["jv_online"] = False
+                CONTESTO["jv_browser"] = None
+                CONTESTO["jv_named"] = True
+                if not jv_launch_browser("open chrome", "open chrome") or CONTESTO.get("jv_browser"):
+                    raise RuntimeError("Chrome mode started while offline")
+                CONTESTO["jv_online"] = True
+                jv_launch_browser("open chrome", "open chrome")
+                if not CONTESTO.get("jv_browser"):
+                    raise RuntimeError("Chrome mode did not start")
+                CONTESTO["jv_named"] = False
+                for text in ("open email", "open canva", "search cats", "open chrome account"):
+                    if not jv_launch_browser(text, text):
+                        raise RuntimeError(f"'{text}' was not handled in Chrome mode")
+                if jv_launch_browser("open a.txt", "open a.txt"):
+                    raise RuntimeError("a file name was taken for a web page")
+                jv_launch_browser("close chrome mode", "close chrome mode")
+                if CONTESTO.get("jv_browser"):
+                    raise RuntimeError("Chrome mode did not end")
+                if jv_launch_browser("open email", "open email"):
+                    raise RuntimeError("'open email' was taken without Chrome mode")
+            finally:
+                CONTESTO["jv_launch_dry"] = False
+                CONTESTO["jv_browser"] = None
+                CONTESTO["jv_online"] = False
+                CONTESTO["jv_named"] = False
+            print("ok")
+        run("Chrome mode: needs online, then 'open email' / 'open canva', never takes file names, ends cleanly", convo)
+
         section("Update system (checks only, nothing is installed)")
         run("Get-SecurityStatus panel", cmd("Get-SecurityStatus"), need=["SECURITY STATUS", "FINGERPRINT", "CODE SCAN", "GUARD", "ISOLATION"])
         cand = os.path.join(tmp, "jarvis_candidate.py")
@@ -7661,6 +7745,334 @@ def jv_launch_search(phrase, limit=60):
                               ("launcher", best, None))
                 return True
     jarvis_say(f"I searched the whole PC and found nothing called '{safe(p)}'{' (time limit reached)' if stopped else ''}, sir.")
+    return True
+
+
+# ---------------- browser mode: 'jarvis open chrome', then 'open email', 'open canva', 'open chrome account <name>' ----------------
+# Only opens web pages (https) in Chrome, on request, while Jarvis is online. It never types, clicks, reads pages or passwords.
+JV_LAUNCH_SITES = {
+    "gmail": ("https://mail.google.com/", None),
+    "outlook": ("https://outlook.live.com/mail/", None),
+    "google": ("https://www.google.com/", "https://www.google.com/search?q={}"),
+    "youtube": ("https://www.youtube.com/", "https://www.youtube.com/results?search_query={}"),
+    "canva": ("https://www.canva.com/", "https://www.canva.com/search?q={}"),
+    "drive": ("https://drive.google.com/", "https://drive.google.com/drive/search?q={}"),
+    "docs": ("https://docs.google.com/document/", None),
+    "sheets": ("https://docs.google.com/spreadsheets/", None),
+    "slides": ("https://docs.google.com/presentation/", None),
+    "forms": ("https://docs.google.com/forms/", None),
+    "calendar": ("https://calendar.google.com/", None),
+    "meet": ("https://meet.google.com/", None),
+    "classroom": ("https://classroom.google.com/", None),
+    "photos": ("https://photos.google.com/", None),
+    "keep": ("https://keep.google.com/", None),
+    "maps": ("https://www.google.com/maps", "https://www.google.com/maps/search/{}"),
+    "translate": ("https://translate.google.com/", None),
+    "github": ("https://github.com/", "https://github.com/search?q={}"),
+    "claude": ("https://claude.ai/", None),
+    "chatgpt": ("https://chatgpt.com/", None),
+    "whatsapp": ("https://web.whatsapp.com/", None),
+    "telegram": ("https://web.telegram.org/", None),
+    "instagram": ("https://www.instagram.com/", None),
+    "facebook": ("https://www.facebook.com/", None),
+    "x": ("https://x.com/", "https://x.com/search?q={}"),
+    "reddit": ("https://www.reddit.com/", "https://www.reddit.com/search/?q={}"),
+    "linkedin": ("https://www.linkedin.com/", None),
+    "tiktok": ("https://www.tiktok.com/", None),
+    "pinterest": ("https://www.pinterest.com/", "https://www.pinterest.com/search/pins/?q={}"),
+    "amazon": ("https://www.amazon.it/", "https://www.amazon.it/s?k={}"),
+    "ebay": ("https://www.ebay.it/", "https://www.ebay.it/sch/i.html?_nkw={}"),
+    "netflix": ("https://www.netflix.com/", None),
+    "spotify": ("https://open.spotify.com/", "https://open.spotify.com/search/{}"),
+    "twitch": ("https://www.twitch.tv/", "https://www.twitch.tv/search?term={}"),
+    "discord": ("https://discord.com/app", None),
+    "steam": ("https://store.steampowered.com/", "https://store.steampowered.com/search/?term={}"),
+    "wikipedia": ("https://en.wikipedia.org/", "https://en.wikipedia.org/w/index.php?search={}"),
+    "onedrive": ("https://onedrive.live.com/", None),
+    "office": ("https://www.office.com/", None),
+    "word": ("https://www.office.com/launch/word", None),
+    "excel": ("https://www.office.com/launch/excel", None),
+    "powerpoint": ("https://www.office.com/launch/powerpoint", None),
+    "teams": ("https://teams.microsoft.com/", None),
+    "zoom": ("https://zoom.us/", None),
+    "dropbox": ("https://www.dropbox.com/", None),
+    "notion": ("https://www.notion.so/", None),
+    "figma": ("https://www.figma.com/", None),
+    "weather": ("https://www.google.com/search?q=weather", None),
+}
+JV_LAUNCH_SITE_ALIASES = {
+    "email": "gmail", "e-mail": "gmail", "mail": "gmail", "my email": "gmail", "my mail": "gmail", "posta": "gmail",
+    "la posta": "gmail", "la mia posta": "gmail", "google mail": "gmail", "hotmail": "outlook", "yt": "youtube",
+    "you tube": "youtube", "google docs": "docs", "google doc": "docs", "document": "docs", "documents": "docs",
+    "google sheets": "sheets", "spreadsheet": "sheets", "google slides": "slides", "google drive": "drive",
+    "google calendar": "calendar", "calendario": "calendar", "agenda": "calendar", "google meet": "meet",
+    "google classroom": "classroom", "google photos": "photos", "foto": "photos", "google maps": "maps",
+    "mappe": "maps", "mappa": "maps", "traduttore": "translate", "google translate": "translate", "git hub": "github",
+    "chat gpt": "chatgpt", "gpt": "chatgpt", "wa": "whatsapp", "whats app": "whatsapp", "insta": "instagram",
+    "fb": "facebook", "twitter": "x", "wiki": "wikipedia", "ms teams": "teams", "microsoft teams": "teams",
+    "microsoft word": "word", "microsoft excel": "excel", "powerpoint presentation": "powerpoint",
+    "one drive": "onedrive", "meteo": "weather", "tempo": "weather", "the weather": "weather",
+}
+JV_LAUNCH_FILE_EXT = frozenset("txt py pyw png jpg jpeg gif bmp webp pdf zip rar 7z gz tar exe dll sys msi bat cmd ps1 docx doc xlsx xls pptx ppt "
+                              "csv tsv json xml log ini cfg md mp3 mp4 wav ogg flac mkv avi mov win dat bin sqlite db iso lnk tmp bak".split())
+JV_LAUNCH_PROFILE_DIR = re.compile(r"^[A-Za-z0-9 _-]{1,40}$")
+
+
+def jv_launch_url_ok(url):
+    """True only for a plain https page on a real host name: no other scheme, no user:password@, no spaces,
+    no local or private address."""
+    import ipaddress
+    from urllib.parse import urlparse
+    if not isinstance(url, str) or not url or len(url) > 2000 or re.search(r'[\s\x00-\x1f\x7f"\'<>`^|\\]', url):
+        return False
+    try:
+        p = urlparse(url)
+        host = p.hostname or ""
+        port = p.port
+    except ValueError:
+        return False
+    if p.scheme != "https" or p.username or p.password or "@" in p.netloc or port not in (None, 443):
+        return False
+    if not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}", host):
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return False
+    except ValueError:
+        pass
+    return host != "localhost" and not host.endswith((".local", ".internal", ".lan"))
+
+
+def jv_launch_web_target(text):
+    """What to open for a phrase such as 'email', 'canva', 'youtube lofi music', 'example.com', 'search cats'.
+    Returns (url, description) or (None, why). Nothing is opened here."""
+    from urllib.parse import quote_plus
+    raw = text.strip().strip("\"'`“”‘’")
+    raw = re.sub(r"[\s.,;:!?]+$", "", raw).strip()
+    raw = re.sub(r"^(?:the|my|il|la|lo|i|le|mio|mia)\s+", "", raw, flags=re.I).strip()
+    low = re.sub(r"\s+", " ", raw.lower())
+    if not low:
+        return None, "nothing to open"
+    if re.match(r"^[a-z][a-z0-9+.-]*:", low) and not low.startswith(("http://", "https://")) and not re.match(r"^[a-z0-9.-]+:\d", low):
+        return None, "I only open web pages (https), sir: never files, scripts or other kinds of link."
+    m = re.match(r"^(?:search(?: for)?|google|cerca(?:mi)?|look up|find)\s+(.+)$", low)
+    if m and m.group(1) not in JV_LAUNCH_SITES and JV_LAUNCH_SITE_ALIASES.get(m.group(1)) is None:
+        q = m.group(1)
+        return "https://www.google.com/search?q=" + quote_plus(q), f"a Google search for '{q}'"
+    if low in JV_LAUNCH_SITE_ALIASES:
+        low = JV_LAUNCH_SITE_ALIASES[low]
+    if low in JV_LAUNCH_SITES:
+        return JV_LAUNCH_SITES[low][0], low
+    words = low.split()
+    for n in (2, 1):                                   # '<site> <what to look for>': youtube lofi music
+        if len(words) > n:
+            head = " ".join(words[:n])
+            head = JV_LAUNCH_SITE_ALIASES.get(head, head)
+            q = re.sub(r"^(?:for|per|di|about)\s+", "", " ".join(words[n:]))
+            if head in JV_LAUNCH_SITES and JV_LAUNCH_SITES[head][1] and q:
+                return JV_LAUNCH_SITES[head][1].format(quote_plus(q)), f"{head}, searching '{q}'"
+    cand = low if low.startswith(("http://", "https://")) else "https://" + low
+    cand = re.sub(r"^http://", "https://", cand)
+    if " " not in low and re.fullmatch(r"https://[^/\s]+\.[a-z]{2,24}(?::443)?(?:[/?#]\S*)?", cand):
+        if jv_launch_url_ok(cand):
+            return cand, "that address"
+        return None, "I won't open that address, sir (only normal https web pages)."
+    return "https://www.google.com/search?q=" + quote_plus(raw), f"a Google search for '{raw}'"
+
+
+def jv_launch_chrome_path():
+    """The Chrome program of this PC, or None."""
+    cands = []
+    if os.name == "nt":
+        for env in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+            base = os.environ.get(env)
+            if base:
+                cands.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+    elif sys.platform == "darwin":
+        cands.append("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    else:
+        for n in ("google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser"):
+            w = shutil.which(n)
+            if w:
+                cands.append(w)
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def jv_launch_chrome_profiles(state_path=None):
+    """Chrome profiles (accounts) read from Chrome's own 'Local State' file, read-only:
+    [{'dir', 'name', 'email'}]. Never reads passwords, cookies or history."""
+    if state_path is None:
+        home = os.path.expanduser("~")
+        if os.name == "nt":
+            state_path = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local"),
+                                      "Google", "Chrome", "User Data", "Local State")
+        elif sys.platform == "darwin":
+            state_path = os.path.join(home, "Library", "Application Support", "Google", "Chrome", "Local State")
+        else:
+            state_path = os.path.join(home, ".config", "google-chrome", "Local State")
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            cache = json.load(f).get("profile", {}).get("info_cache", {})
+    except (OSError, ValueError, AttributeError):
+        return []
+    res = []
+    for d, info in cache.items():
+        if isinstance(info, dict) and isinstance(d, str) and JV_LAUNCH_PROFILE_DIR.match(d):
+            res.append({"dir": d, "name": str(info.get("name") or d)[:60],
+                        "email": str(info.get("user_name") or info.get("gaia_name") or "")[:80]})
+    res.sort(key=lambda p: (p["dir"] != "Default", p["dir"]))
+    return res
+
+
+def jv_launch_profile_match(query, profs):
+    """Profiles that fit 'paolo', 'work', 'name@gmail.com' or a number (1 = first in the list)."""
+    q = re.sub(r"^(?:the|my|il|mio|account|profile|profilo|di|of|for|named|chiamato)\s+", "", query.strip().lower().strip("\"'`")).strip()
+    q = re.sub(r"^(?:the|my|il|mio)\s+", "", q).strip()
+    if not q:
+        return []
+    if q.isdigit() and 1 <= int(q) <= len(profs):
+        return [profs[int(q) - 1]]
+    exact = [p for p in profs if q in (p["name"].lower(), p["email"].lower(), p["dir"].lower())]
+    if exact:
+        return exact
+    part = [p for p in profs if q in p["name"].lower() or q in p["email"].lower() or q in p["dir"].lower()]
+    if part:
+        return part
+    names = {p["name"].lower(): p for p in profs}
+    names.update({p["email"].lower(): p for p in profs if p["email"]})
+    close = difflib.get_close_matches(q, list(names), n=2, cutoff=0.7)
+    return [names[c] for c in close]
+
+
+def jv_launch_chrome_open(urls, profile_dir=None):
+    """Start Chrome (read-only for me: I only hand it addresses). The command is a list, never a shell string."""
+    import subprocess
+    if CONTESTO.get("jv_launch_dry"):
+        return True
+    exe = jv_launch_chrome_path()
+    if not exe:
+        return False
+    for u in urls:
+        if not jv_launch_url_ok(u):
+            return False
+    cmd = [exe]
+    if profile_dir:
+        if not JV_LAUNCH_PROFILE_DIR.match(profile_dir):
+            return False
+        cmd.append("--profile-directory=" + profile_dir)
+    cmd += list(urls)
+    kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    if os.name == "nt":
+        kw["creationflags"] = 0x00000008 | 0x00000200
+    else:
+        kw["start_new_session"] = True
+    subprocess.Popen(cmd, **kw)
+    return True
+
+
+def jv_launch_browser(orig, t):
+    """Browser mode. 'jarvis open chrome' starts it; then 'open email', 'open canva', 'open youtube lofi',
+    'search ...', 'open chrome account <name>' open pages in Chrome, in the chosen account, until 'close chrome mode'.
+    Needs 'jarvis be online'. True when the sentence was for the browser."""
+    br = CONTESTO.get("jv_browser")
+    named = bool(CONTESTO.get("jv_named"))
+    s = re.sub(r"[\s.,;:!?]+$", "", t.strip())
+    s = re.sub(r"^(?:please|pls|per favore|ok|then|poi|now|ora)[,\s]+", "", s)
+    s = re.sub(r"^(?:can|could|would) you(?: please)?\s+|^(?:puoi|potresti)\s+", "", s)
+    if br and re.fullmatch(r"(?:close|exit|stop|end|leave|quit|chiudi|termina|esci da|finish)\s+(?:the\s+)?(?:chrome|browser|browsing)(?:\s+mode)?|"
+                           r"(?:done|finished) (?:with )?(?:chrome|the browser)|(?:chrome|browser) mode off", s):
+        CONTESTO["jv_browser"] = None
+        jarvis_say("Chrome mode ended, sir. I only stop sending pages; the browser window stays as it is.")
+        return True
+    m = re.fullmatch(r"(?:open|launch|start|apri|avvia|lancia|switch to|passa a|use|usa)\s+(?:google\s+)?chrome"
+                     r"(?:\s+(?:and\s+)?(?:with|using|on|in|con|su)?\s*(?:the\s+|my\s+)?(?:account|profile|profilo|user)\b\s*(.*))?", s)
+    if m and (named or br):
+        acct = (m.group(1) or "").strip()
+        if not CONTESTO.get("jv_online"):
+            jarvis_say("I only open Chrome and web pages while I'm online, sir. Say 'jarvis be online' first.")
+            return True
+        profs = jv_launch_chrome_profiles()
+        profile = None
+        if re.search(r"\b(?:account|profile|profilo|user)\b", s) and not acct:
+            if not profs:
+                jarvis_say("I can't see any Chrome accounts, sir (Chrome keeps the list in its 'Local State' file). Open Chrome once and sign in.")
+                return True
+            jarvis_say("Chrome accounts I can see, sir: say  open chrome account <name or number>")
+            for i, p in enumerate(profs, 1):
+                out(f"  [{i}] {safe(p['name'])}" + (f"  <{safe(p['email'])}>" if p["email"] else "") + f"   ({safe(p['dir'])})")
+            return True
+        if acct:
+            hits = jv_launch_profile_match(acct, profs)
+            if not profs:
+                jarvis_say("I can't see any Chrome accounts, sir. Open Chrome once and sign in, then try again.")
+                return True
+            if not hits:
+                jarvis_say(f"No Chrome account matches '{safe(acct)}', sir. Say 'open chrome account' to see the list.")
+                return True
+            if len(hits) > 1:
+                jarvis_say(f"'{safe(acct)}' fits more than one account, sir; say the number:")
+                for i, p in enumerate(profs, 1):
+                    if p in hits:
+                        out(f"  [{i}] {safe(p['name'])}" + (f"  <{safe(p['email'])}>" if p["email"] else ""))
+                return True
+            profile = hits[0]
+        if not CONTESTO.get("jv_launch_dry") and not jv_launch_chrome_path():
+            jarvis_say("I can't find Chrome on this PC, sir. Is it installed?")
+            return True
+        ok = jv_launch_chrome_open([], profile["dir"] if profile else (br or {}).get("profile"))
+        if not ok:
+            jarvis_say("Chrome would not start, sir.")
+            return True
+        CONTESTO["jv_browser"] = {"profile": profile["dir"] if profile else (br or {}).get("profile"),
+                                  "label": (profile["name"] if profile else (br or {}).get("label"))}
+        who = f" with the account '{safe(profile['name'])}'" if profile else ""
+        jarvis_say(f"Chrome{who} is starting, sir. Chrome mode is on: say  open email / open canva / open <site> / search <words>,  "
+                   f"and 'close chrome mode' when you are done.")
+        return True
+    m = re.fullmatch(r"(?:open|go to|goto|visit|apri|vai su|vai a|search(?: for)?|google|cerca(?:mi)?|look up)\s+(.+)", s)
+    if not m:
+        return False
+    rest = m.group(1).strip()
+    explicit = re.search(r"\s+(?:in|on|with|su|con|using)\s+(?:google\s+)?chrome$", rest)
+    if explicit:
+        rest = rest[:explicit.start()].strip()
+    if not (br or (named and explicit)):
+        return False
+    verb = s.split()[0]
+    if verb in ("search", "google", "cerca", "cercami", "look") and not re.match(r"^(?:search|google|cerca|look up)", rest):
+        rest = "search " + rest
+    low = rest.lower()
+    if re.fullmatch(r"(?:it|this|that|them|these|those|here|0|\d{1,3}|(?:the )?(?:first|second|third|1st|2nd|3rd)(?: one)?)", low) \
+            or re.search(r"[\\/]", low) and not low.startswith("http") or os.path.isfile(rest) or os.path.isdir(rest):
+        return False                                    # a file, folder or number of an earlier list: not a web page
+    ext = low.rsplit(".", 1)[-1] if re.fullmatch(r"[^\s/]+\.[a-z0-9]{1,6}", low) else ""
+    if ext in JV_LAUNCH_FILE_EXT:
+        return False                                    # 'open notes.txt' is a file, never a web address
+    if not CONTESTO.get("jv_online"):
+        jarvis_say("I only open web pages while I'm online, sir. Say 'jarvis be online' first.")
+        return True
+    url, desc = jv_launch_web_target(rest)
+    if not url:
+        jarvis_say(desc)
+        return True
+    if not jv_launch_url_ok(url):
+        jarvis_say("I won't open that address, sir.")
+        return True
+    if not CONTESTO.get("jv_launch_dry") and not jv_launch_chrome_path():
+        jarvis_say("I can't find Chrome on this PC, sir. Is it installed?")
+        return True
+    prof = (br or {}).get("profile")
+    if not jv_launch_chrome_open([url], prof):
+        jarvis_say("Chrome would not open it, sir.")
+        return True
+    if not br:
+        CONTESTO["jv_browser"] = {"profile": None, "label": None}
+    acct = f" (account '{safe(br['label'])}')" if br and br.get("label") else ""
+    jarvis_say(f"Opening {safe(desc)} in Chrome{acct}, sir.")
+    out("  " + safe(url), GRAY)
     return True
 
 
