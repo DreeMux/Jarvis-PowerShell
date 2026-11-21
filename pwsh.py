@@ -235,7 +235,7 @@ def set_location(args):
     try:
         os.chdir(dest)
         CONTESTO["file"] = None
-    except OSError:
+    except (OSError, ValueError):
         a = os.path.abspath(dest)
         error("Set-Location", f"Cannot find path '{a}' because it does not exist.",
               "ObjectNotFound", a, "ItemNotFoundException",
@@ -277,7 +277,7 @@ def get_content(args):
             with open(p, encoding="utf-8", errors="replace") as f:
                 for riga in f:
                     out(safe(riga.rstrip("\r\n")))
-        except OSError:
+        except (OSError, ValueError):
             a = os.path.abspath(p)
             error("Get-Content", f"Cannot find path '{a}' because it does not exist.",
                   "ObjectNotFound", a, "ItemNotFoundException",
@@ -1288,7 +1288,7 @@ def system_memory():
             return s.ullTotalPhys - s.ullAvailPhys, s.ullTotalPhys
         if os.path.exists("/proc/meminfo"):
             vals = {}
-            with open("/proc/meminfo") as f:
+            with open("/proc/meminfo", encoding="utf-8", errors="replace") as f:
                 for line in f:
                     k, _, v = line.partition(":")
                     vals[k] = int(v.split()[0]) * 1024
@@ -1328,9 +1328,9 @@ def battery_info():
             base = "/sys/class/power_supply"
             for n in sorted(os.listdir(base)):
                 if n.startswith("BAT"):
-                    with open(f"{base}/{n}/capacity") as f:
+                    with open(f"{base}/{n}/capacity", encoding="utf-8", errors="replace") as f:
                         pct = int(f.read().strip())
-                    with open(f"{base}/{n}/status") as f:
+                    with open(f"{base}/{n}/status", encoding="utf-8", errors="replace") as f:
                         st = f.read().strip()
                     return {"percent": pct, "plugged": st != "Discharging", "secs": None}
     except Exception:
@@ -2150,7 +2150,7 @@ def jv_uptime():
         if os.name == "nt":
             import ctypes
             return ctypes.windll.kernel32.GetTickCount64() / 1000.0
-        with open("/proc/uptime") as f:
+        with open("/proc/uptime", encoding="utf-8", errors="replace") as f:
             return float(f.read().split()[0])
     except Exception:
         return None
@@ -5803,6 +5803,9 @@ def jarvis_interpret(texto):
     """Understand a plain-language request. Also: 'again' repeats the last one, and obvious typos of my own
     keywords are repaired when the first reading finds nothing."""
     low = re.sub(JV_NAMED_RE, " ", texto, flags=re.I).lower()
+    if re.fullmatch(r"\W*(?:hack|hackera|hackerati|auto-?hack)\s+(?:yourself|your ?self|te stesso|tu stesso)\W*", low.strip()):
+        jv_hack_yourself()                  # read-only self-audit, shown step by step
+        return True
     words = [w for w in re.findall(r"[a-zà-ÿ']+", low) if w not in JV_FILLER]
     if words and len(words) <= 5 and re.fullmatch(
             r"(?:do (?:that|it|this) again|again|repeat(?: that| it)?|once more|one more time|ancora|di nuovo|"
@@ -5824,6 +5827,185 @@ def jarvis_interpret(texto):
     if r and not CONTESTO.pop("jv_nostore", False):
         CONTESTO["jv_last"] = texto
     return r
+
+
+class JvSink:
+    """Swallows everything a tested command prints (the self-audit only reports, it does not echo)."""
+    def write(self, text):
+        return len(text)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+    encoding = "utf-8"
+    errors = "replace"
+
+
+JV_HACK_SKIP = ("exit", "implement", "jarvis", "launch", "maintenance", "voice", "extract.key", "clear-host")
+JV_HACK_ARGS = ("", "-force", "nonexistent_zzz", "/", ".", "..", "*", "'", '"', "-1", "999999999999",
+                "é世界🙂", "a b", "-recurse", "C:\\", "%", "|", "$x", "\x00", "-" * 50, "x" * 3000)
+JV_HACK_PHRASES = ("how many lines", "what is inside", "is it corrupt", "free disk space", "biggest files",
+                   "status", "again", "go up", "ciao", "?", "'", "\x00", "a" * 3000, "é世界🙂", "99999999999")
+
+
+def jv_hack_step(n, total, text):
+    jarvis_say(f"[{n}/{total}] {text}")
+    time.sleep(0.15)                          # slow enough to be watched
+
+
+def jv_hack_static(src):
+    """Reads the source as text and as a syntax tree. Returns (findings, notes). Nothing is run, nothing is written."""
+    import ast
+    found, notes = [], []
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        return [("SYNTAX", e.lineno or 0, str(e.msg))], notes
+    known = set(dir(len.__self__)) | {"__file__", "__name__", "__doc__"}
+    defined = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
+            defined.add(n.name)
+        elif isinstance(n, ast.Import):
+            defined.update((a.asname or a.name).split(".")[0] for a in n.names)
+        elif isinstance(n, ast.ImportFrom):
+            defined.update(a.asname or a.name for a in n.names)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            defined.add(n.id)
+        elif isinstance(n, ast.arg):
+            defined.add(n.arg)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            defined.add(n.name)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            defined.update(n.names)
+    loaded = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+            loaded.add(n.id)
+            if n.id not in defined and n.id not in known:
+                found.append(("UNDEFINED NAME", n.lineno, n.id))
+        elif isinstance(n, ast.ExceptHandler) and n.type is None:
+            found.append(("BARE EXCEPT", n.lineno, "catches even Ctrl+C"))
+        elif isinstance(n, ast.FunctionDef):
+            for d in n.args.defaults + [k for k in n.args.kw_defaults if k]:
+                if isinstance(d, (ast.List, ast.Dict, ast.Set)):
+                    found.append(("MUTABLE DEFAULT", n.lineno, n.name))
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "open":
+            mode = n.args[1].value if len(n.args) > 1 and isinstance(n.args[1], ast.Constant) else ""
+            if "b" not in str(mode) and "encoding" not in {k.arg for k in n.keywords}:
+                found.append(("OPEN WITHOUT ENCODING", n.lineno, "text file read with the system default"))
+    for n in tree.body:
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names:
+                nm = (a.asname or a.name).split(".")[0]
+                if nm not in loaded and nm not in src.replace("import " + nm, ""):
+                    found.append(("UNUSED IMPORT", n.lineno, nm))
+    for scope in ast.walk(tree):
+        if isinstance(scope, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+            seen = {}
+            for n in scope.body:
+                if isinstance(n, (ast.FunctionDef, ast.ClassDef)):
+                    if n.name in seen and not n.decorator_list:
+                        found.append(("DUPLICATE DEFINITION", n.lineno, f"{n.name} (first at line {seen[n.name]})"))
+                    seen[n.name] = n.lineno
+    notes.append(f"{src.count(chr(10)) + 1} lines, {len(tree.body)} top-level blocks, {len(defined)} names")
+    return found, notes
+
+
+def jv_hack_dynamic():
+    """Throws hostile arguments at every safe command and at the plain-language reader. Returns (calls, crashes)."""
+    saved_ctx, saved_cwd, saved_out = dict(CONTESTO), os.getcwd(), sys.stdout
+    calls, crashes = 0, {}
+
+    def attempt(label, fn):
+        nonlocal calls
+        calls += 1
+        sys.stdout = JvSink()
+        try:
+            fn()
+        except SystemExit:
+            pass
+        except Exception as e:                       # a crash the shell would have to catch for you
+            tb = e.__traceback__
+            while tb.tb_next:
+                tb = tb.tb_next
+            crashes.setdefault((tb.tb_frame.f_code.co_name, tb.tb_lineno), (label, type(e).__name__, str(e)[:70]))
+        finally:
+            sys.stdout = saved_out
+    try:
+        for nome, fn in list(NOMI.items()):
+            if nome.lower() in JV_HACK_SKIP:
+                continue
+            for a in JV_HACK_ARGS:
+                CONTESTO["riga"] = f"{nome} {a}"
+                attempt(f"{nome} {a[:20]!r}", lambda fn=fn, a=a: fn([a] if a else []))
+        for ph in JV_HACK_PHRASES:
+            CONTESTO["riga"] = ph
+            attempt(f"jarvis {ph[:20]!r}", lambda ph=ph: jarvis_interpret(ph))
+    finally:
+        sys.stdout = saved_out
+        try:
+            os.chdir(saved_cwd)
+        except OSError:
+            pass
+        CONTESTO.clear()
+        CONTESTO.update(saved_ctx)
+    return calls, crashes
+
+
+def jv_hack_yourself():
+    """'jarvis hack yourself': Jarvis audits his own code in front of you. READ-ONLY: it reads this file and runs
+    harmless commands with hostile arguments; it fixes nothing by itself and writes nothing."""
+    total = 5
+    out()
+    jarvis_say("Self-audit started, sir. I will look for my own mistakes. Nothing will be changed.")
+    out()
+    jv_hack_step(1, total, "Reading my own source code (read-only).")
+    try:
+        with open(os.path.abspath(__file__), encoding="utf-8", errors="replace") as f:
+            src = f.read()
+    except OSError as e:
+        jarvis_say(f"I cannot read myself: {safe(str(e))}")
+        return
+    out(f"      {len(src):,} characters read.", GRAY)
+    jv_hack_step(2, total, "Checking that every line is valid Python and that every name exists.")
+    found, notes = jv_hack_static(src)
+    for note in notes:
+        out(f"      {note}", GRAY)
+    real = [x for x in found if x[0] not in ("UNUSED IMPORT",)]
+    for kind, line, detail in found[:25]:
+        out(f"      line {line:>5}  {kind:<22} {safe(str(detail))}", JV_SEC_A)
+    if len(found) > 25:
+        out(f"      ... and {len(found) - 25} more.", GRAY)
+    if not found:
+        out("      Nothing found.", GREEN)
+    jv_hack_step(3, total, "Attacking every safe command with hostile input (empty, huge, null bytes, emoji, wildcards).")
+    calls, crashes = jv_hack_dynamic()
+    out(f"      {calls} attacks launched.", GRAY)
+    for (func, line), (label, kind, msg) in list(crashes.items())[:25]:
+        out(f"      CRASH in {func}() line {line}: {kind}: {safe(msg)}   <- {safe(label)}", RED)
+    if not crashes:
+        out("      No command crashed.", GREEN)
+    jv_hack_step(4, total, "Running my own security scan on this file.")
+    try:
+        import ast
+        viol = jv_upd_scan(ast.parse(src))
+        n = len(viol) if viol is not None else 0
+        out(f"      {n} violation(s).", GREEN if n == 0 else RED)
+    except Exception as e:
+        out(f"      scan not available here: {safe(str(e))}", GRAY)
+    jv_hack_step(5, total, "Verdict.")
+    bad = len(real) + len(crashes)
+    out()
+    if bad == 0:
+        jarvis_say("Self-audit complete: no errors found, sir. I am clean.")
+    else:
+        jarvis_say(f"Self-audit complete: {len(real)} code problem(s) and {len(crashes)} crash(es). "
+                   "Tell your assistant to fix them: I never change myself without 'implement jarvis'.")
+    out()
 
 
 @cmdlet("Jarvis", group="Assistant", usage="""jarvis <request in plain English or Italian>
