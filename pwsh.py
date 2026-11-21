@@ -19,7 +19,9 @@
 Run:  python pwsh.py      (Windows: double-click START.bat)
 Type  help  or just talk to it:  "find my games", "scan this PC for corrupt files".
 
-Everything here is READ-ONLY: nothing is ever written, moved, executed or deleted.
+Everything here is READ-ONLY: nothing of yours is ever written, moved or deleted. Only two things you
+ask for explicitly go further: "implement jarvis" (updates this very file, after 9 safety checks and
+with a backup) and "jarvis open <game>" (starts the game's own program).
 Optional: pip install psutil  (live memory/CPU of a running game in pluton.key).
 Optional extensions: put .py files in a folder named ext/ next to this file.
 """
@@ -46,6 +48,11 @@ import time
 import zipfile
 import zlib
 from datetime import datetime
+
+# ---------------- JARVIS DATA (only rewritten by 'implement jarvis' maintenance updates) ----------------
+# JV_DATA_BEGIN
+JV_DATA = {'version': 2, 'game_dirs': ['c:\\program files (x86)\\steam\\steamapps\\common\\DELTARUNEdemo'], 'updated': '2026-10-17 20:40'}
+# JV_DATA_END
 
 # ---------------- COLORI ORIGINALI (console Windows PowerShell) ----------------
 def fg(r, g, b): return f"\x1b[38;2;{r};{g};{b}m"
@@ -1552,7 +1559,20 @@ def get_help(args):
             al = f"   (alias: {', '.join(ALIASES[n])})" if ALIASES[n] else ""
             out(f"  {n.ljust(w)}{describe(n)}{al}")
         out()
-    jarvis_say('You can also just tell me what you need, sir: "find my games", "scan this PC", "select <file>".')
+    out("JARVIS PHRASES (say them after 'jarvis', or just type them)", YELLOW)
+    for a, b in (
+        ("jarvis open <game>", "START the installed game, e.g. jarvis open deltarune  (chapter: jarvis open deltarune chapter 2)"),
+        ("open <game>", "without 'jarvis' it only shows the game's data.win read-only, it never starts the game"),
+        ("open data.win / open the 2nd one", "open a file or an item of the last list, read-only (also: read <file>, select <file>, go up)"),
+        ("find my games", "locate the data.win of your games   (also: scan this PC for corrupt files, status, examples)"),
+        ("implement jarvis", "update myself: 9 safety checks, backup, automatic rollback  (-Dry = checks only)"),
+        ("implement jarvis <file.py>", "install that file;  <https://...> -Sha256 <hash>  downloads it first (hash required)"),
+        ("maintenance", "read-only health check: integrity, security scan, backups, quarantine, last log lines"),
+    ):
+        out(f"  {a.ljust(34)}{b}")
+    out()
+    jarvis_say('You can also just tell me what you need, sir: "find my games", "scan this PC", "select <file>", '
+               '"jarvis open <game>", "implement jarvis".')
     out()
 
 
@@ -1590,7 +1610,7 @@ def jarvis_status(intro="Systems nominal, sir"):
 def jarvis_greeting():
     jarvis_say(f"JARVIS online. {part_of_day()}, sir.")
     jarvis_say("Hunter, game locator, file inspector and resource monitor are standing by. "
-               "Everything I do is read-only.")
+               "Everything I do is read-only, except updating myself or starting a game when you ask.")
     jarvis_status("Current status")
     jarvis_say('Type "help" for commands, or just tell me what you need: '
                '"find my games", "scan this PC for corrupt files".')
@@ -1676,7 +1696,7 @@ def jv_listing(folder="."):
 def jv_games(depth=6):
     """The data.win files of the known game folders, in the same order undersopic.key lists them."""
     seen, res = set(), []
-    for p in find_named(game_locations(), GM_FILE, depth):
+    for p in find_named(game_locations() + jv_launch_extra_dirs(), GM_FILE, depth):
         key = os.path.normcase(os.path.realpath(p))
         if key not in seen:
             seen.add(key)
@@ -1794,6 +1814,8 @@ def jv_resolve(cand, strict=False, games=False):
             except OSError:
                 nm = ""
             folder = os.path.basename(os.path.dirname(os.path.abspath(p))).lower()
+            if re.fullmatch(JV_LAUNCH_CHAPTER, folder):
+                folder = os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(p)))).lower() + " " + folder
             if low in folder or (nm and low in nm):
                 hits.append(p)
         if len(hits) == 1:
@@ -1953,6 +1975,8 @@ def jv_open_request(orig, t, sel):
     else:
         mode = "show"
     strict = mode in ("read", "show")
+    if mode == "open" and CONTESTO.get("jv_named") and jv_launch_try(rest):
+        return True                                   # 'jarvis open <game>' started (or listed) a game
     st, pay = jv_resolve(rest, strict=strict, games=not strict)
     tail = None
     if st in ("none", "range"):
@@ -2010,7 +2034,12 @@ def jv_open_request(orig, t, sel):
     else:
         jv_open_view(pay)
     if tail:
-        jarvis_interpret(tail)
+        was = CONTESTO.get("jv_cmd")
+        CONTESTO["jv_cmd"] = CONTESTO.get("jv_named")
+        try:
+            jarvis_interpret(tail)
+        finally:
+            CONTESTO["jv_cmd"] = was
     return True
 
 
@@ -2150,9 +2179,10 @@ def jv_examples(t):
     if not re.search(r"\bexamples?\b|\besempi\b|what can i ask|cosa posso chiedere|what (?:else )?can you answer|"
                      r"what do you know|capabilit", t):
         return False
-    jarvis_say("Here is what I can answer, sir. All read-only:")
+    jarvis_say("Here is what I can answer, sir. All read-only, except the START A GAME and UPDATE rows:")
     rows = [
         ("OPEN", 'open data.win   |   open the 2nd one   |   open undertale   |   read notes.txt   |   go up'),
+        ("START A GAME", 'jarvis open deltarune   |   jarvis open undertale   |   jarvis open deltarune chapter 2   (plain "open deltarune" never starts it)'),
         ("ANY FILE", 'how big is it   |   when was it modified   |   what type is it   |   is it corrupt   |   sha256   |   does the md5 match <hash>'),
         ("TEXT", 'how many lines/words   |   first 20 lines   |   last 5 lines   |   lines 10 to 20   |   search for "word"   |   hex dump'),
         ("CSV / JSON", 'which columns   |   average of <column>   |   first 5 rows   |   which keys   |   value of <key>'),
@@ -2161,6 +2191,7 @@ def jv_examples(t):
         ("GAMES (data.win)", 'what game is this   |   how many sprites/rooms/sounds   |   list the chunks   |   biggest chunk   |   search for "text"'),
         ("FOLDER", 'how many files here   |   biggest files   |   newest / oldest   |   find all png files   |   duplicates   |   bigger than 100 MB   |   modified today   |   by extension'),
         ("PC", 'free disk space   |   what time is it   |   uptime   |   status   |   find my games   |   scan this PC for corrupt files'),
+        ("UPDATE", 'implement jarvis   |   implement jarvis -Dry   |   implement jarvis <file.py>   |   maintenance'),
     ]
     w = max(len(a) for a, _ in rows)
     for a, b in rows:
@@ -3336,6 +3367,8 @@ def jv_deep(orig, t, sel):
 def jarvis_interpret(texto):
     """Map a plain-language request (English or Italian) to a read-only command.
     Returns True if it understood and handled the request."""
+    CONTESTO["jv_named"] = bool(re.match(r"^(?:(?:hey|ok|okay|hi|hello|ciao)[,\s]+)?jarvis\b", texto.strip(), re.I)) \
+        or bool(CONTESTO.get("jv_cmd"))
     orig = re.sub(r"^(?:(?:hey|ok|okay|hi|hello|ciao)[,\s]+)?jarvis\b[,:!\s]*", "",
                   texto.strip(), flags=re.I)
     orig = orig.strip().rstrip("?!. ").strip()
@@ -3358,7 +3391,9 @@ def jarvis_interpret(texto):
         return True
     if has("who are you", "chi sei", "your name"):
         jarvis_say("I am JARVIS, your file assistant. I hunt corrupt files, locate the data.win of your "
-                   "games and report on memory and battery. I never modify, move or delete anything.")
+                   "games and report on memory and battery. I never modify, move or delete anything of yours. "
+                   "The only exceptions are updating myself (implement jarvis, with a backup) and "
+                   "starting a game when you say 'jarvis open <game>'.")
         return True
     if has("how are you", "come stai"):
         jarvis_say("Operating at full capacity, sir. Thank you for asking.")
@@ -3437,6 +3472,9 @@ def jarvis_interpret(texto):
   jarvis select data.win        then:  jarvis tell me about it / what's inside / how much battery
   jarvis status
   jarvis open data.win          opens it read-only (also: open the 2nd one, open undertale, read notes.txt, go up)
+  jarvis open deltarune         STARTS the installed game (jarvis open deltarune chapter 2 picks a chapter)
+  open deltarune                without 'jarvis': only shows the data.win read-only, never starts the game
+  implement jarvis              update myself (see: help implement)       maintenance   health check
   jarvis how many lines / first 20 lines / search for "word" / sha256 / is it corrupt
   jarvis what game is this / how many sprites / list the chunks      (for a GameMaker data.win)
   jarvis which columns / which tables / how many pages / is it 64-bit / what is inside
@@ -3445,9 +3483,982 @@ def jarvis_interpret(texto):
 (You can also skip the word 'jarvis': just type the request.)""")
 def jarvis_cmd(args):
     """Talk to JARVIS in plain language, e.g.  jarvis find my games"""
-    if not jarvis_interpret(" ".join(args)):
+    CONTESTO["jv_cmd"] = True            # spoken to Jarvis by name: 'jarvis open <game>' may start a game
+    try:
+        handled = jarvis_interpret(" ".join(args))
+    finally:
+        CONTESTO["jv_cmd"] = False
+    if not handled:
         jarvis_say("I'm afraid I didn't catch that, sir. Try 'find my games', 'scan this PC', "
                    "'open <file>', 'examples' or 'help'.")
+
+
+# ======================= JARVIS SELF-UPDATE =======================
+# The ONLY code that writes to disk, downloads or restarts lives in functions named jv_upd_*.
+# Starting a game lives in jv_launch_*.  An update is REFUSED unless every jv_upd_* / jv_launch_*
+# function and every JV_UPD_* / JV_LAUNCH_* constant stays identical (compared on the syntax tree).
+JV_UPD_MAX_BYTES = 4 * 1024 * 1024
+JV_UPD_SECONDS = 10
+JV_UPD_PHASES = ("valid source", "checksum", "syntax", "data block", "security scan",
+                 "updater intact", "commands kept", "start test", "start speed")
+JV_UPD_PROTECTED = ("jv_upd_", "jv_launch_")
+JV_UPD_PROTECTED_CONST = ("JV_UPD_", "JV_LAUNCH_")
+JV_UPD_NET = ("urllib", "http", "ftplib", "smtplib", "telnetlib", "requests", "xmlrpc", "ssl", "poplib",
+              "imaplib", "paramiko", "websocket", "websockets", "aiohttp", "httpx", "socketserver", "asyncio")
+JV_UPD_DYNAMIC = ("importlib", "pickle", "marshal", "shelve", "pty", "multiprocessing", "webbrowser",
+                  "code", "codeop", "builtins", "imp", "zipimport", "pkgutil")
+JV_UPD_BAD_BUILTINS = ("eval", "exec", "compile", "__import__", "breakpoint")
+JV_UPD_BAD_CALLS = (
+    "os.remove", "os.unlink", "os.rmdir", "os.removedirs", "os.rename", "os.renames", "os.replace",
+    "os.truncate", "os.chmod", "os.chown", "os.mkdir", "os.makedirs", "os.symlink", "os.link", "os.open",
+    "os.popen", "os.startfile", "os.kill", "os.killpg", "os.fork", "os.forkpty", "os.putenv", "os.system",
+    "shutil.rmtree", "shutil.move", "shutil.copy", "shutil.copy2", "shutil.copyfile", "shutil.copyfileobj",
+    "shutil.copytree", "shutil.copymode", "shutil.copystat", "shutil.make_archive", "shutil.unpack_archive",
+    "shutil.chown", "sqlite3.connect", "runpy.run_path", "runpy.run_module", "tempfile.mkstemp",
+    "tempfile.mkdtemp", "tempfile.NamedTemporaryFile", "tempfile.TemporaryDirectory",
+)
+JV_UPD_BAD_PREFIX = ("subprocess.", "os.exec", "os.spawn", "os.posix_spawn")
+JV_UPD_BAD_METHODS = ("write_text", "write_bytes", "unlink", "rmdir", "mkdir", "touch", "symlink_to",
+                      "hardlink_to", "chmod", "rmtree", "removedirs", "makedirs")
+JV_UPD_OPENERS = ("open", "io.open", "codecs.open", "gzip.open", "bz2.open", "lzma.open", "tarfile.open",
+                  "zipfile.ZipFile", "ZipFile", "os.fdopen")
+JV_UPD_MODULES = ("os", "shutil", "sys", "subprocess", "builtins")
+# (function, thing) pairs that the existing, read-only code is allowed to do.
+JV_UPD_ALLOW = (
+    ("pc_roots", "ctypes"), ("system_memory", "ctypes"), ("battery_info", "ctypes"), ("jv_uptime", "ctypes"),
+    ("battery_info", "subprocess.run"), ("jv_global", "socket"), ("sqlite_open_ro", "sqlite3.connect"),
+    ("carica_estensioni", "runpy.run_path"), ("main", "os.system"),
+)
+JV_LAUNCH_SKIP = ("unins", "uninstall", "setup", "install", "redist", "vcredist", "dxsetup", "crash", "report",
+                  "helper", "updater", "update", "dotnet", "directx", "vc_", "oalinst", "cleanup", "config")
+JV_LAUNCH_CHAPTER = r"(?i)(?:chapter|capitolo|cap|ch)[ _.-]?(\d{1,2})(?:[ _-]?(?:windows|win|mac|macos|linux))?"
+
+
+# ---------------- paths, log ----------------
+def jv_upd_dir():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_update")
+
+
+def jv_upd_sub(name):
+    d = os.path.join(jv_upd_dir(), name)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def jv_upd_log(msg):
+    try:
+        with open(os.path.join(jv_upd_sub("."), "update.log"), "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n")
+    except OSError:
+        pass
+
+
+def jv_upd_safe_name(name):
+    base = re.sub(r"[^\w.\-]", "_", os.path.basename(name))[:60] or "update.py"
+    return base if base.lower().endswith(".py") else base + ".py"
+
+
+# ---------------- the data block ----------------
+def jv_upd_data_block(src):
+    """(error, data): the JV_DATA block of a Jarvis source, checked strictly."""
+    import ast
+    begin = [m for m in re.finditer(r"^# JV_DATA_BEGIN[ \t]*\r?$", src, re.M)]
+    end = [m for m in re.finditer(r"^# JV_DATA_END[ \t]*\r?$", src, re.M)]
+    if len(begin) != 1 or len(end) != 1 or begin[0].end() > end[0].start():
+        return "the JV_DATA block is missing or not unique", None
+    inner = src[begin[0].end():end[0].start()].strip()
+    try:
+        mod = ast.parse(inner)
+        ok = (len(mod.body) == 1 and isinstance(mod.body[0], ast.Assign)
+              and len(mod.body[0].targets) == 1 and isinstance(mod.body[0].targets[0], ast.Name)
+              and mod.body[0].targets[0].id == "JV_DATA")
+        if not ok:
+            return "the JV_DATA block must be exactly one assignment", None
+        data = ast.literal_eval(mod.body[0].value)
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
+        return "the JV_DATA block is not a plain literal", None
+    if (not isinstance(data, dict) or set(data) != {"version", "game_dirs", "updated"}
+            or not isinstance(data["version"], int) or isinstance(data["version"], bool)
+            or not 1 <= data["version"] <= 1000000
+            or not isinstance(data["updated"], str) or len(data["updated"]) > 40
+            or not isinstance(data["game_dirs"], list) or len(data["game_dirs"]) > 100):
+        return "the JV_DATA block has the wrong shape (version, game_dirs, updated)", None
+    for d in data["game_dirs"]:
+        if not isinstance(d, str) or not d or len(d) > 400 or "\n" in d or "\x00" in d:
+            return "the JV_DATA block has an invalid game folder", None
+    return None, data
+
+
+# ---------------- security scan ----------------
+def jv_upd_scan(tree):
+    """Violations found outside the protected updater/launcher code. A safety net against mistakes
+    and clumsy code, NOT a guarantee against deliberately hostile code."""
+    import ast
+    found = []
+    seen = set()
+
+    def dotted(n):
+        parts = []
+        while isinstance(n, ast.Attribute):
+            parts.append(n.attr)
+            n = n.value
+        if isinstance(n, ast.Name):
+            parts.append(n.id)
+            return ".".join(reversed(parts))
+        return None
+
+    def flag(owner, node, key, text):
+        if (owner, key) in JV_UPD_ALLOW:
+            return
+        tag = (owner, key, getattr(node, "lineno", 0))
+        if tag not in seen:
+            seen.add(tag)
+            found.append(f"line {getattr(node, 'lineno', '?')}: {text} (in {owner})")
+
+    for top in tree.body:
+        owner = top.name if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else "<module>"
+        if owner.startswith(JV_UPD_PROTECTED):
+            continue
+        for node in ast.walk(top):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                if isinstance(node, ast.ImportFrom) and node.level:
+                    flag(owner, node, "relative-import", "relative import")
+                    continue
+                mods = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+                for m in mods:
+                    root = m.split(".")[0]
+                    if root in JV_UPD_NET:
+                        flag(owner, node, root, f"network module '{root}'")
+                    elif root in JV_UPD_DYNAMIC:
+                        flag(owner, node, root, f"dynamic-code module '{root}'")
+                    elif root in ("ctypes", "socket"):
+                        flag(owner, node, root, f"import of '{root}'")
+                    elif isinstance(node, ast.ImportFrom) and root in ("os", "shutil", "subprocess", "runpy", "sqlite3"):
+                        flag(owner, node, root, f"'from {root} import ...'")
+            elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                if node.value.id == "ctypes":
+                    flag(owner, node, "ctypes", "use of ctypes")
+                elif node.value.id == "socket" and node.attr != "gethostname":
+                    flag(owner, node, "socket", f"socket.{node.attr}")
+            elif isinstance(node, ast.Call):
+                f = node.func
+                name = dotted(f)
+                if isinstance(f, ast.Name) and f.id in JV_UPD_BAD_BUILTINS:
+                    flag(owner, node, f.id, f"{f.id}()")
+                if isinstance(f, ast.Name) and f.id in ("getattr", "setattr", "delattr") and node.args \
+                        and isinstance(node.args[0], ast.Name) and node.args[0].id in JV_UPD_MODULES:
+                    flag(owner, node, "getattr", f"{f.id}() on module '{node.args[0].id}'")
+                for kw in node.keywords:
+                    if kw.arg == "shell" and not (isinstance(kw.value, ast.Constant) and kw.value.value is False):
+                        flag(owner, node, "shell", "shell=...")
+                if name in JV_UPD_OPENERS:
+                    mode = node.args[1] if len(node.args) > 1 else None
+                    for kw in node.keywords:
+                        if kw.arg == "mode":
+                            mode = kw.value
+                    if mode is not None:
+                        if not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)):
+                            flag(owner, node, "open-mode", f"{name}() with a non-literal mode")
+                        elif any(c in mode.value for c in "wax+"):
+                            flag(owner, node, "open-write", f"{name}() opened for writing")
+                if name in JV_UPD_BAD_CALLS:
+                    if name == "os.system" and node.args and isinstance(node.args[0], ast.Constant) \
+                            and node.args[0].value == "":
+                        pass
+                    else:
+                        flag(owner, node, name, f"{name}()")
+                elif name and name.startswith(JV_UPD_BAD_PREFIX):
+                    flag(owner, node, name, f"{name}()")
+                if isinstance(f, ast.Attribute) and f.attr in JV_UPD_BAD_METHODS:
+                    flag(owner, node, "." + f.attr, f".{f.attr}()")
+            elif isinstance(node, ast.Name) and node.id in ("__builtins__", "__loader__", "__spec__"):
+                flag(owner, node, node.id, f"use of {node.id}")
+    return found
+
+
+def jv_upd_protected(tree):
+    """name -> syntax-tree dump of every protected function / class / constant."""
+    import ast
+    res = {}
+    for top in tree.body:
+        if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and top.name.startswith(JV_UPD_PROTECTED):
+            res[top.name] = ast.dump(top)
+        elif isinstance(top, (ast.Assign, ast.AnnAssign)):
+            tgts = top.targets if isinstance(top, ast.Assign) else [top.target]
+            for t in tgts:
+                if isinstance(t, ast.Name) and t.id.startswith(JV_UPD_PROTECTED_CONST):
+                    res[t.id] = ast.dump(top)
+    return res
+
+
+def jv_upd_cmds(tree):
+    """(every name+alias lowercased, canonical names) of the @cmdlet(...) commands of a source."""
+    import ast
+    names, canon = set(), []
+    for top in ast.walk(tree):
+        if isinstance(top, ast.FunctionDef):
+            for d in top.decorator_list:
+                if isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == "cmdlet":
+                    vals = [a.value for a in d.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+                    names.update(v.lower() for v in vals)
+                    if vals:
+                        canon.append(vals[0])
+    return names, canon
+
+
+# ---------------- running a candidate in a throw-away folder ----------------
+def jv_upd_run(path, cwd, stdin_text, limit=20):
+    import subprocess
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    t0 = time.perf_counter()
+    try:
+        r = subprocess.run([sys.executable, path], input=stdin_text, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=limit, cwd=cwd, env=env)
+    except subprocess.TimeoutExpired:
+        return None, "", f"did not finish in {limit} s", float(limit)
+    except OSError as e:
+        return None, "", str(e), 0.0
+    return r.returncode, r.stdout, r.stderr, time.perf_counter() - t0
+
+
+def jv_upd_phase(i, ok, detail=""):
+    name = JV_UPD_PHASES[i - 1]
+    out(f"  [{i}/{len(JV_UPD_PHASES)}] {name.ljust(15)} {'OK    ' if ok else 'FAILED'} {detail}".rstrip(),
+        GREEN if ok else RED)
+    return ok
+
+
+def jv_upd_check(cand, want_sha):
+    """The 9 safety phases, in order. Returns (ok, phase name, reason). Installs nothing."""
+    import ast
+    import tempfile
+    me = os.path.abspath(__file__)
+
+    def bad(i, why):
+        jv_upd_phase(i, False, why)
+        return False, JV_UPD_PHASES[i - 1], why
+
+    # 1 - valid source
+    try:
+        with open(cand, "rb") as f:
+            raw = f.read(JV_UPD_MAX_BYTES + 1)
+    except OSError as e:
+        return bad(1, f"cannot read it ({e.strerror})")
+    if not raw or len(raw) > JV_UPD_MAX_BYTES:
+        return bad(1, "empty or bigger than 4 MB")
+    if b"\x00" in raw:
+        return bad(1, "contains binary data")
+    try:
+        src = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return bad(1, "not valid UTF-8 text")
+    if "def main(" not in src or "__main__" not in src:
+        return bad(1, "not a Jarvis program (no main)")
+    jv_upd_phase(1, True, human(len(raw)))
+    # 2 - checksum
+    digest = hashlib.sha256(raw).hexdigest()
+    if want_sha:
+        if digest != want_sha.lower():
+            return bad(2, f"sha256 is {digest[:16]}..., expected {want_sha.lower()[:16]}...")
+        jv_upd_phase(2, True, "matches the one you gave")
+    else:
+        jv_upd_phase(2, True, f"none given, sha256 {digest[:16]}...")
+    # 3 - syntax
+    try:
+        tree = ast.parse(src, "<update>")
+        compile(tree, "<update>", "exec")
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as e:
+        return bad(3, f"line {getattr(e, 'lineno', '?')}: {e}")
+    jv_upd_phase(3, True)
+    # 4 - data block
+    err, data = jv_upd_data_block(src)
+    if err:
+        return bad(4, err)
+    jv_upd_phase(4, True, f"data v{data['version']}, {len(data['game_dirs'])} game folder(s)")
+    # 5 - security scan
+    found = jv_upd_scan(tree)
+    if found:
+        return bad(5, f"{len(found)} violation(s), first: {found[0]}")
+    jv_upd_phase(5, True, "0 violations")
+    # 6 - the updater / launcher code is untouched
+    try:
+        with open(me, encoding="utf-8") as f:
+            cur_src = f.read()
+        cur_tree = ast.parse(cur_src)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return bad(6, "cannot read the running Jarvis to compare")
+    a, b = jv_upd_protected(cur_tree), jv_upd_protected(tree)
+    if a != b:
+        diff = sorted({k for k in set(a) | set(b) if a.get(k) != b.get(k)})
+        return bad(6, "changed or missing: " + ", ".join(diff[:4]))
+    jv_upd_phase(6, True, f"{len(a)} protected item(s) identical")
+    # 7 - every command of today is still there
+    cur_names, cur_canon = jv_upd_cmds(cur_tree)
+    new_names, _ = jv_upd_cmds(tree)
+    gone = sorted(cur_names - new_names)
+    if gone:
+        return bad(7, "missing: " + ", ".join(gone[:6]))
+    jv_upd_phase(7, True, f"{len(cur_names)} names kept, {len(new_names - cur_names)} new")
+    # 8 + 9 - start it for real in a disposable folder, and compare the speed
+    with tempfile.TemporaryDirectory(prefix="jarvis_test_") as tmp:
+        dirs = {}
+        for tag, text in (("new", src), ("old", cur_src)):
+            dirs[tag] = os.path.join(tmp, tag)
+            os.makedirs(dirs[tag])
+            with open(os.path.join(dirs[tag], "pwsh.py"), "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+        script = {k: os.path.join(v, "pwsh.py") for k, v in dirs.items()}
+        rc, so, se, t_new = jv_upd_run(script["new"], dirs["new"], "Get-Command\nexit\n")
+        if rc != 0:
+            return bad(8, f"exit code {rc}: {(se or so).strip().splitlines()[-1][:120] if (se or so).strip() else 'no output'}")
+        if "Traceback" in so or "Traceback" in se:
+            return bad(8, "it printed a Python error on start")
+        if "Windows PowerShell" not in so:
+            return bad(8, "it did not show the usual start screen")
+        miss = [c for c in cur_canon if c not in so]
+        if miss:
+            return bad(8, "commands not listed by Get-Command: " + ", ".join(miss[:4]))
+        jv_upd_phase(8, True, f"started and closed cleanly in {t_new:.2f} s")
+        times_new, times_old = [t_new], []
+        rc2, _, _, t2 = jv_upd_run(script["new"], dirs["new"], "exit\n")
+        if rc2 == 0:
+            times_new.append(t2)
+        for _ in range(2):
+            rc3, _, _, t3 = jv_upd_run(script["old"], dirs["old"], "exit\n")
+            if rc3 == 0:
+                times_old.append(t3)
+        if times_old and min(times_new) > min(times_old) * 1.5 + 0.75:
+            return bad(9, f"{min(times_new):.2f} s against {min(times_old):.2f} s of the current version")
+        jv_upd_phase(9, True, f"{min(times_new):.2f} s (current: {min(times_old):.2f} s)" if times_old else "")
+    return True, "", ""
+
+
+# ---------------- sources ----------------
+def jv_upd_fetch(url):
+    """Download a source (https only; plain http only for this computer). Returns bytes or raises ValueError."""
+    import urllib.parse
+    import urllib.request
+    p = urllib.parse.urlparse(url)
+    local = (p.hostname or "") in ("localhost", "127.0.0.1", "::1")
+    if p.scheme != "https" and not (p.scheme == "http" and local):
+        raise ValueError("only https:// links are accepted")
+    req = urllib.request.Request(url, headers={"User-Agent": "JARVIS-updater"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = r.read(JV_UPD_MAX_BYTES + 1)
+    except OSError as e:
+        raise ValueError(f"download failed ({e})")
+    if len(data) > JV_UPD_MAX_BYTES:
+        raise ValueError("the download is bigger than 4 MB")
+    return data
+
+
+def jv_upd_stage(raw, name):
+    """Put the candidate in jarvis_update/work/ (the checks always run on this private copy)."""
+    path = os.path.join(jv_upd_sub("work"), f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{jv_upd_safe_name(name)}")
+    with open(path, "wb") as f:
+        f.write(raw)
+    return path
+
+
+def jv_upd_build_maintenance(cur_src, cur_data):
+    """A maintenance build: the current program with a fresh JV_DATA block. Returns (bytes, summary) or (None, why)."""
+    dirs = []
+    for p in find_named(game_locations(), GM_FILE, 6):
+        d = os.path.dirname(os.path.abspath(p))
+        if d not in dirs:
+            dirs.append(d)
+    for d in cur_data.get("game_dirs", []):
+        if os.path.isdir(d) and d not in dirs:
+            dirs.append(d)
+    dirs = dirs[:100]
+    if dirs == cur_data.get("game_dirs"):
+        return None, "already up to date"
+    data = {"version": int(cur_data.get("version", 0)) + 1, "game_dirs": dirs,
+            "updated": datetime.now().strftime("%Y-%m-%d %H:%M")}
+    begin = re.search(r"^# JV_DATA_BEGIN[ \t]*\r?$", cur_src, re.M)
+    end = re.search(r"^# JV_DATA_END[ \t]*\r?$", cur_src, re.M)
+    if not begin or not end:
+        return None, "the running file has no data block"
+    new = cur_src[:begin.end()] + "\nJV_DATA = " + repr(data) + "\n" + cur_src[end.start():]
+    return new.encode("utf-8"), f"{len(dirs)} game folder(s) learned from this PC"
+
+
+# ---------------- install / reject ----------------
+def jv_upd_sha_of(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def jv_upd_install(cand):
+    """Backup the running file, put the candidate in its place, roll back on any trouble. Returns the backup path."""
+    me = os.path.abspath(__file__)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = os.path.join(jv_upd_sub("backups"), f"{os.path.splitext(os.path.basename(me))[0]}_{stamp}.py")
+    shutil.copy2(me, backup)
+    if jv_upd_sha_of(backup) != jv_upd_sha_of(me):
+        os.remove(backup)
+        raise OSError("the backup is not identical to the original, nothing was changed")
+    want = jv_upd_sha_of(cand)
+    tmp = me + ".jvnew"
+    try:
+        shutil.copyfile(cand, tmp)
+        if jv_upd_sha_of(tmp) != want:
+            raise OSError("the new file was not copied correctly")
+        os.replace(tmp, me)
+        if jv_upd_sha_of(me) != want:
+            raise OSError("the installed file does not match")
+    except Exception:
+        try:
+            shutil.copyfile(backup, tmp)
+            os.replace(tmp, me)
+        except OSError:
+            pass
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return backup
+
+
+def jv_upd_discard(*paths):
+    n = 0
+    for p in paths:
+        if p and os.path.isfile(p):
+            try:
+                os.remove(p)
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
+def jv_upd_quarantine(work, incoming, why):
+    dest = os.path.join(jv_upd_sub("rejected"), os.path.basename(work))
+    shutil.move(work, dest)
+    try:
+        with open(dest + ".reason.txt", "w", encoding="utf-8") as f:
+            f.write(why + "\n")
+    except OSError:
+        pass
+    jv_upd_discard(incoming)
+    return dest
+
+
+def jv_upd_readline(deadline):
+    """One typed line, or None when the time is up (or the input is closed)."""
+    if os.name == "nt":
+        import msvcrt
+        buf = ""
+        while time.time() < deadline:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("\r", "\n"):
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return buf
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                if ch == "\x08":
+                    if buf:
+                        buf = buf[:-1]
+                        sys.stdout.write("\b \b")
+                elif ch >= " ":
+                    buf += ch
+                    sys.stdout.write(ch)
+                sys.stdout.flush()
+            else:
+                time.sleep(0.05)
+        return None
+    import select
+    left = deadline - time.time()
+    if left <= 0:
+        return None
+    try:
+        ready = select.select([sys.stdin], [], [], left)[0]
+    except (OSError, ValueError):
+        return None
+    if not ready:
+        return None
+    line = sys.stdin.readline()
+    return None if line == "" else line.rstrip("\r\n")
+
+
+def jv_upd_restart(fresh_window):
+    """Start Jarvis again from the file on disk. Does not return."""
+    me = os.path.abspath(__file__)
+    sys.stdout.write("\x1b[0m\x1b[2J\x1b[H")
+    sys.stdout.flush()
+    if os.name == "nt":
+        import subprocess
+        if fresh_window:
+            subprocess.Popen([sys.executable, me], creationflags=0x10, cwd=os.path.dirname(me))   # CREATE_NEW_CONSOLE
+            raise SystemExit(0)
+        raise SystemExit(subprocess.call([sys.executable, me], cwd=os.getcwd()))
+    if fresh_window:
+        os.chdir(os.path.dirname(me))
+    os.execv(sys.executable, [sys.executable, me])
+
+
+def jv_upd_countdown(work, incoming, why):
+    """Refused update: 'delete' within the time keeps the window and deletes it; silence closes this session."""
+    out()
+    out(f"UPDATE REFUSED: {why}", RED)
+    out("Nothing was installed and Jarvis is untouched.", GRAY)
+    out(f"Type  delete  within {JV_UPD_SECONDS} seconds to throw the update away and keep this window.", YELLOW)
+    out("No answer: this window closes, the update goes to quarantine and a fresh, intact Jarvis opens.", YELLOW)
+    deadline = time.time() + JV_UPD_SECONDS
+    while True:
+        line = jv_upd_readline(deadline)
+        if line is None:
+            break
+        if line.strip().lower() == "delete":
+            n = jv_upd_discard(work, incoming)
+            jv_upd_log(f"REFUSED and DELETED by the user: {why}")
+            out(f"Update deleted ({n} file(s)). This window stays open.", GREEN)
+            out()
+            return
+        out(f"'{safe(line.strip())}' is not 'delete'. {max(0, int(deadline - time.time()))} s left.", YELLOW)
+    try:
+        dest = jv_upd_quarantine(work, incoming, why)
+    except OSError:
+        dest = "(could not move it)"
+    jv_upd_log(f"REFUSED, no answer, quarantined at {dest}: {why}")
+    out(f"No answer. Quarantined: {safe(dest)}", RED)
+    out("Closing this session and opening a fresh Jarvis...", RED)
+    jv_upd_restart(True)
+
+
+# ---------------- implement jarvis ----------------
+@cmdlet("Implement", "Implement-Jarvis", group="Assistant", usage="""implement jarvis                      update myself: maintenance build with real data from this PC (or the file waiting in jarvis_update/incoming/)
+implement jarvis <file.py>           install that file as the new Jarvis
+implement jarvis <https://...> -Sha256 <hash>    download it (the hash is REQUIRED), then install
+implement jarvis -Dry                run all the checks, install nothing
+implement jarvis -Maintenance        ignore jarvis_update/incoming/ and build the maintenance update
+The 9 checks: valid source, checksum, syntax, data block, security scan, updater code intact,
+every command of today still present, start test in a throw-away folder, start speed.
+All passed: the old file is copied to jarvis_update/backups/, the new one is installed (automatic
+rollback on any trouble) and Jarvis restarts. One failed: nothing is installed, then type  delete
+within 10 seconds to discard it and keep this window; no answer = this session closes, the update goes
+to jarvis_update/rejected/ and a fresh Jarvis opens.
+(Only install updates from sources you trust: the scan catches mistakes, not deliberately hostile code.)""")
+def jv_upd_cmd(args):
+    """Update Jarvis itself: 9 safety checks, backup, automatic rollback."""
+    args = list(args)
+    usage = "Usage: implement jarvis [<file.py> | <https://...> -Sha256 <hash>] [-Dry] [-Maintenance]"
+    if not args or args[0].lower() != "jarvis":
+        out(usage, YELLOW)
+        out()
+        return
+    dry = force_m = False
+    sha = src = None
+    i = 1
+    while i < len(args):
+        a, al = args[i], args[i].lower()
+        if al in ("-dry", "-dryrun", "-whatif"):
+            dry = True
+        elif al == "-maintenance":
+            force_m = True
+        elif al in ("-sha256", "-hash"):
+            i += 1
+            sha = args[i] if i < len(args) else ""
+        elif al.startswith("-sha256="):
+            sha = a.split("=", 1)[1]
+        elif src is None and not a.startswith("-"):
+            src = a
+        else:
+            out(f"Unknown or repeated option '{safe(a)}'.", RED)
+            out(usage, YELLOW)
+            out()
+            return
+        i += 1
+    if sha is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", sha):
+        out("-Sha256 needs the 64 hexadecimal characters of the SHA-256 hash.", RED)
+        out()
+        return
+    is_url = bool(src and re.match(r"https?://", src, re.I))
+    if is_url and not sha:
+        out("Refused: a download needs  -Sha256 <hash>.  Installing code you cannot verify is like running a stranger's file.", RED)
+        out()
+        return
+    me = os.path.abspath(__file__)
+    work, incoming = None, None
+    try:
+        try:
+            with open(me, encoding="utf-8") as f:
+                cur_src = f.read()
+        except (OSError, UnicodeDecodeError) as e:
+            out(f"I cannot read myself ({e}). Nothing was done.", RED)
+            out()
+            return
+        label = ""
+        try:
+            if is_url:
+                label = src
+                work = jv_upd_stage(jv_upd_fetch(src), src.rsplit("/", 1)[-1] or "download.py")
+            elif src:
+                path = os.path.expanduser(src)
+                if not os.path.isfile(path):
+                    out(f"Cannot find the update file '{safe(src)}'. Nothing was done.", RED)
+                    out()
+                    return
+                with open(path, "rb") as f:
+                    raw = f.read(JV_UPD_MAX_BYTES + 1)
+                label = os.path.abspath(path)
+                if not label.lower().endswith(".py"):
+                    out("An update must be a .py file. Nothing was done.", RED)
+                    out()
+                    return
+                if os.path.dirname(label) == os.path.join(jv_upd_dir(), "incoming"):
+                    incoming = label
+                work = jv_upd_stage(raw, path)
+            else:
+                inc = os.path.join(jv_upd_dir(), "incoming")
+                waiting = sorted((os.path.join(inc, n) for n in os.listdir(inc) if n.lower().endswith(".py")),
+                                 key=os.path.getmtime) if (not force_m and os.path.isdir(inc)) else []
+                if waiting:
+                    incoming = waiting[0]
+                    label = incoming + "  (waiting in jarvis_update/incoming/)"
+                    with open(incoming, "rb") as f:
+                        work = jv_upd_stage(f.read(JV_UPD_MAX_BYTES + 1), incoming)
+                else:
+                    err, cur_data = jv_upd_data_block(cur_src)
+                    if err:
+                        out(f"I cannot build the maintenance update: {err}.", RED)
+                        out()
+                        return
+                    out("Collecting real data from this PC for a maintenance update...", GRAY)
+                    raw, note = jv_upd_build_maintenance(cur_src, cur_data)
+                    if raw is None:
+                        jarvis_say(f"Nothing to update, sir: {note}.")
+                        out()
+                        return
+                    label = f"maintenance build ({note})"
+                    work = jv_upd_stage(raw, "maintenance.py")
+        except (OSError, ValueError) as e:
+            out(f"Cannot get the update: {e}. Nothing was done.", RED)
+            out()
+            return
+        out()
+        out(f"Update source: {safe(label)}", CYAN)
+        out(f"Running the {len(JV_UPD_PHASES)} safety checks...", GRAY)
+        ok, phase, why = jv_upd_check(work, sha)
+        if not ok:
+            if dry:
+                out(f"Dry run: this update would be REFUSED at '{phase}'. Nothing was installed.", RED)
+                out()
+                return
+            jv_upd_countdown(work, incoming, f"check '{phase}' failed: {why}")
+            work = None
+            return
+        if dry:
+            out(f"Dry run: all {len(JV_UPD_PHASES)} checks passed. Nothing was installed.", GREEN)
+            out()
+            return
+        try:
+            backup = jv_upd_install(work)
+        except OSError as e:
+            jv_upd_log(f"INSTALL FAILED, rolled back: {e}")
+            out(f"The installation failed and the old version is back in place: {e}", RED)
+            out()
+            return
+        jv_upd_log(f"INSTALLED {label}; backup {backup}")
+        jv_upd_discard(work, incoming)
+        work = None
+        out()
+        out("All checks passed. The new version is installed.", GREEN)
+        out(f"Backup of the old version: {safe(backup)}", GRAY)
+        out("Restarting Jarvis with the new version...", GRAY)
+        jv_upd_restart(False)
+    finally:
+        if work:
+            jv_upd_discard(work)
+
+
+# ---------------- maintenance (read-only health check) ----------------
+@cmdlet("Maintenance", group="Assistant", usage="""maintenance     read-only health check of Jarvis: integrity, security scan, backups, quarantine, last log lines
+(it changes nothing; to update, use  implement jarvis)""")
+def jv_upd_maintenance_cmd(args):
+    """Read-only health check of Jarvis (integrity, security scan, backups, log)."""
+    import ast
+    me = os.path.abspath(__file__)
+    out()
+    out("JARVIS maintenance check (read-only)", YELLOW)
+    try:
+        with open(me, encoding="utf-8") as f:
+            src = f.read()
+        tree = ast.parse(src)
+        out(f"  Program      : {safe(me)}  ({human(len(src.encode('utf-8')))}, sha256 {jv_upd_sha_of(me)[:16]}...)", GREEN)
+    except (OSError, SyntaxError, UnicodeDecodeError) as e:
+        out(f"  Program      : cannot be checked ({e})", RED)
+        out()
+        return
+    err, data = jv_upd_data_block(src)
+    if err:
+        out(f"  Data block   : {err}", RED)
+    else:
+        alive = sum(1 for d in data["game_dirs"] if os.path.isdir(d))
+        out(f"  Data block   : version {data['version']}, last update '{data['updated'] or 'never'}', "
+            f"{alive}/{len(data['game_dirs'])} learned game folder(s) still there", GREEN)
+    found = jv_upd_scan(tree)
+    out(f"  Security scan: {'0 violations' if not found else str(len(found)) + ' violation(s), first: ' + found[0]}",
+        GREEN if not found else RED)
+    prot = jv_upd_protected(tree)
+    out(f"  Protected    : {len(prot)} updater/launcher item(s)", GREEN)
+    base = jv_upd_dir()
+
+    def count(sub, ext=".py"):
+        try:
+            return sorted(n for n in os.listdir(os.path.join(base, sub)) if n.lower().endswith(ext))
+        except OSError:
+            return []
+    backups = count("backups")
+    out(f"  Backups      : {len(backups)}" + (f", newest {safe(backups[-1])}" if backups else ""),
+        GREEN if backups else GRAY)
+    out(f"  Quarantine   : {len(count('rejected'))} rejected update(s)", GRAY)
+    out(f"  Incoming     : {len(count('incoming'))} update(s) waiting", GRAY)
+    try:
+        with open(os.path.join(base, "update.log"), encoding="utf-8", errors="replace") as f:
+            last = f.read().splitlines()[-5:]
+    except OSError:
+        last = []
+    out("  Last log     : " + ("(none yet)" if not last else ""), GRAY)
+    for ln in last:
+        out("    " + safe(ln)[:150], GRAY)
+    out()
+
+
+# ======================= GAME LAUNCHER (jarvis open <game>) =======================
+# Only 'jarvis open <game>' starts anything: the game's own program, found inside the game's own folder.
+# A plain 'open <game>' keeps showing the data.win read-only and never starts it.
+def jv_launch_extra_dirs():
+    """Game folders learned during updates (JV_DATA)."""
+    try:
+        return [d for d in JV_DATA.get("game_dirs", []) if isinstance(d, str) and os.path.isdir(d)]
+    except Exception:
+        return []
+
+
+def jv_launch_norm(s):
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def jv_launch_exes(folder):
+    """The programs that can start a game in this folder (installers, crash reporters... skipped)."""
+    res = []
+    try:
+        names = sorted(os.listdir(folder), key=str.lower)
+    except OSError:
+        return res
+    for n in names:
+        low, p = n.lower(), os.path.join(folder, n)
+        if any(s in low for s in JV_LAUNCH_SKIP):
+            continue
+        if os.name == "nt":
+            ok = low.endswith(".exe") and os.path.isfile(p)
+        elif sys.platform == "darwin":
+            ok = low.endswith(".app") and os.path.isdir(p)
+        else:
+            ok = os.path.isfile(p) and (low.endswith((".x86_64", ".x86", ".sh", ".appimage"))
+                                        or ("." not in n and os.access(p, os.X_OK)))
+        if ok:
+            res.append(p)
+    return res
+
+
+def jv_launch_best(exes, names):
+    """Of several programs, the one named like the game; otherwise the biggest."""
+    if not exes:
+        return None
+    want = {jv_launch_norm(n) for n in names if n}
+    for p in exes:
+        if jv_launch_norm(os.path.splitext(os.path.basename(p))[0]) in want:
+            return p
+    try:
+        return max(exes, key=os.path.getsize)
+    except OSError:
+        return exes[0]
+
+
+def jv_launch_games(force=False):
+    """Installed games, one per game folder (chapter folders are grouped under their parent):
+    {name, alt, root, wins, parts:[(label, exe, chapter)], winexe}."""
+    cached = CONTESTO.get("jv_launch_cache")
+    if cached and not force and time.time() - cached[0] < 30:
+        return cached[1]
+    roots = {}
+    for w in jv_games():
+        d = os.path.dirname(os.path.abspath(w))
+        m = re.fullmatch(JV_LAUNCH_CHAPTER, os.path.basename(d))
+        root = os.path.dirname(d) if m else d
+        g = roots.setdefault(os.path.normcase(os.path.realpath(root)),
+                             {"name": os.path.basename(root) or root, "alt": "", "root": root,
+                              "wins": [], "dirs": [], "parts": [], "winexe": False})
+        g["wins"].append(w)
+        g["dirs"].append((d, int(m.group(1)) if m else None))
+    for g in roots.values():
+        try:
+            g["alt"] = gm_read_info(g["wins"][0])["name"] or ""
+        except Exception:
+            g["alt"] = ""
+        names = [g["name"], g["alt"]]
+        launcher = jv_launch_best(jv_launch_exes(g["root"]), names)
+        if launcher:
+            g["parts"] = [("launcher", launcher, None)]
+        else:
+            for d, ch in sorted(g["dirs"], key=lambda x: (x[1] or 0, x[0].lower())):
+                exe = jv_launch_best(jv_launch_exes(d), names)
+                if exe:
+                    g["parts"].append((os.path.basename(d), exe, ch))
+        if not g["parts"] and os.name != "nt":
+            try:
+                g["winexe"] = any(n.lower().endswith(".exe") for n in os.listdir(g["root"]))
+            except OSError:
+                pass
+    games = sorted(roots.values(), key=lambda g: g["name"].lower())
+    CONTESTO["jv_launch_cache"] = (time.time(), games)
+    return games
+
+
+def jv_launch_match(phrase, games):
+    """(matching games, chapter number or None) for what the person said."""
+    p = re.sub(r"\s+(?:please|pls|now|subito|ora|per favore)$", "", phrase.strip(), flags=re.I)
+    p = re.sub(r"^(?:(?:the|il|lo|la|my|mio|il mio|game|gioco|il gioco|the game)\s+)+", "", p, flags=re.I).strip()
+    tries = [(p, None)]
+    m = re.match(r"(?i)^(.*?)[\s,]*(?:chapter|capitolo|cap\.?|ch\.?|#)?\s*(\d{1,2})$", p)
+    if m and m.group(1).strip():
+        tries.append((m.group(1).strip(), int(m.group(2))))
+    for text, ch in tries:
+        n = jv_launch_norm(text)
+        if len(n) < 2:
+            continue
+        exact = [g for g in games if n in (jv_launch_norm(g["name"]), jv_launch_norm(g["alt"]))]
+        if exact:
+            return exact, ch
+        part = [g for g in games if len(n) >= 3 and (n in jv_launch_norm(g["name"]) or n in jv_launch_norm(g["alt"]))]
+        if part:
+            return part, ch
+        if len(n) >= 5:
+            close = [g for g in games if difflib.get_close_matches(n, [jv_launch_norm(g["name"]),
+                                                                        jv_launch_norm(g["alt"])], n=1, cutoff=0.85)]
+            if close:
+                return close, ch
+    return [], None
+
+
+def jv_launch_run(game, part):
+    """Start ONE program of a known game folder. Everything is checked first."""
+    label, exe, chapter = part
+    name = safe(game["name"])
+    real_root = os.path.normcase(os.path.realpath(game["root"]))
+    real_exe = os.path.normcase(os.path.realpath(exe))
+    if not (real_exe.startswith(real_root + os.sep) and os.path.exists(exe)
+            and any(os.path.isfile(w) for w in game["wins"])):
+        jarvis_say(f"I won't start that, sir: it is not inside the folder of a game I know ({name}).")
+        return
+    if os.name != "nt" and exe.lower().endswith(".exe"):
+        jarvis_say(f"{name} is a Windows program, sir: this system cannot start it.")
+        return
+    import subprocess
+    jarvis_say(f"Launching {name}{'' if label == 'launcher' else ' (' + safe(label) + ')'}, sir. "
+               "I only start the game's own program; I don't touch its files.")
+    out(f"  {safe(exe)}", GRAY)
+    try:
+        if sys.platform == "darwin" and exe.lower().endswith(".app"):
+            proc = subprocess.Popen(["open", exe], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+        elif os.name == "nt":
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            proc = subprocess.Popen([exe], cwd=os.path.dirname(exe), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    close_fds=True, creationflags=flags)
+        else:
+            proc = subprocess.Popen([exe], cwd=os.path.dirname(exe), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    close_fds=True, start_new_session=True)
+    except OSError as e:
+        jarvis_say(f"It would not start, sir ({safe(e.strerror or e)}).")
+        return
+    time.sleep(1.2)
+    rc = proc.poll()
+    if rc not in (None, 0):
+        jarvis_say(f"It closed right away with exit code {rc}, sir. Try starting it once from its own folder.")
+    else:
+        jarvis_say(f"{name} is starting, sir.")
+    out()
+
+
+def jv_launch_start(game, chapter):
+    parts = game["parts"]
+    if not parts:
+        if game["winexe"]:
+            jarvis_say(f"{safe(game['name'])} has only a Windows program, sir: this system cannot start it.")
+        else:
+            jarvis_say(f"I found the folder of {safe(game['name'])} but no program to start in it, sir.")
+        out(f"  {safe(game['root'])}", GRAY)
+        jarvis_say(f"'open {safe(game['name'])}' (without 'jarvis') still shows its data.win.")
+        return
+    if len(parts) > 1:
+        if chapter is not None:
+            hit = [p for p in parts if p[2] == chapter]
+            if not hit:
+                jarvis_say(f"{safe(game['name'])} has no chapter {chapter} here, sir.")
+                return
+            jv_launch_run(game, hit[0])
+            return
+        jarvis_say(f"{safe(game['name'])} has several chapters, sir. Which one?")
+        for i, p in enumerate(parts, 1):
+            out(f"  [{i}] {safe(p[0])}", CYAN)
+        CONTESTO["jv_launch_pending"] = [(game, p) for p in parts]
+        jarvis_say("Say 'jarvis open 1', 'jarvis open 2'... or 'jarvis open <game> chapter 2'.")
+        return
+    jv_launch_run(game, parts[0])
+
+
+def jv_launch_try(rest):
+    """'jarvis open <rest>': True when it was a game request (started, listed, or explained); False to let the
+    normal read-only open handle it (files, folders, data.win, numbers of an earlier list...)."""
+    phrase = re.sub(r"[\s.,;:!?]+$", "", rest.strip().strip("\"'`“”‘’")).strip()
+    if not phrase or re.search(r"[\\/:]", phrase) or phrase.lower() in JV_PRON or phrase.lower() in JV_HERE:
+        return False
+    num = re.fullmatch(r"(?:#|n\.?\s*|number\s+|numero\s+)?(\d{1,3})(?:st|nd|rd|th)?", phrase, re.I) \
+        or re.fullmatch(r"(first|second|third|fourth|fifth|primo|secondo|terzo|quarto|quinto)", phrase, re.I)
+    pend = CONTESTO.get("jv_launch_pending")
+    if num:
+        if not pend:
+            return False
+        idx = int(num.group(1)) if num.group(1).isdigit() else JV_ORD[num.group(1).lower()]
+        if 1 <= idx <= len(pend):
+            game, part = pend[idx - 1]
+            CONTESTO.pop("jv_launch_pending", None)
+            if part is None:
+                jv_launch_start(game, None)
+            else:
+                jv_launch_run(game, part)
+        else:
+            jarvis_say(f"There are only {len(pend)} choice(s), sir.")
+        return True
+    if jv_filename_tokens(phrase) and not re.search(r"\s", phrase):
+        return False                                           # looks like a file name: normal open
+    if os.path.isfile(phrase):
+        return False
+    matches, chapter = jv_launch_match(phrase, jv_launch_games())
+    if not matches:
+        return False
+    CONTESTO.pop("jv_launch_pending", None)
+    if len(matches) > 1:
+        jarvis_say("Several games match, sir. Which one?")
+        for i, g in enumerate(matches, 1):
+            out(f"  [{i}] {safe(g['name'])}   {safe(g['root'])}", CYAN)
+        CONTESTO["jv_launch_pending"] = [(g, None) for g in matches]
+        jarvis_say("Say 'jarvis open 1', 'jarvis open 2'... or give me the exact name.")
+        return True
+    jv_launch_start(matches[0], chapter)
+    return True
 
 
 # ---------------- PARSER E LOOP ----------------
