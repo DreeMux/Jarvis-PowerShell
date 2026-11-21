@@ -274,6 +274,8 @@ def get_content(args):
                   "GetContentReaderUnauthorizedAccessError,Microsoft.PowerShell.Commands.GetContentCommand")
             continue
         try:
+            if device_path(p):
+                raise FileNotFoundError(p)          # CON/NUL/COM1... would wait for input forever
             with open(p, encoding="utf-8", errors="replace") as f:
                 for riga in f:
                     out(safe(riga.rstrip("\r\n")))
@@ -481,12 +483,33 @@ def target_args(args):
     return flags, pos
 
 
+DEVICE_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+                         | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)})
+
+
+def device_path(p, win=None):
+    """True for Windows device names (CON, NUL, COM1, \\\\.\\...). They 'exist' but opening them waits for
+    input forever, so no command may ever open them as files."""
+    if win is None:
+        win = os.name == "nt"
+    if not win:
+        return False
+    t = str(p).replace("/", "\\")
+    if t.startswith("\\\\.\\"):
+        return True
+    for part in t.split("\\"):
+        stem = part.split(":")[-1].rstrip(" .").split(".")[0].rstrip(" ").upper()
+        if stem in DEVICE_NAMES:
+            return True
+    return False
+
+
 def resolve_existing(pos, cmd):
     p = pos[0]
     joined = " ".join(pos)
     if not os.path.exists(p) and os.path.exists(joined):
         p = joined
-    if not os.path.exists(p):
+    if device_path(p) or not os.path.exists(p):
         a = os.path.abspath(p)
         error(cmd, f"Cannot find path '{a}' because it does not exist.",
               "ObjectNotFound", a, "ItemNotFoundException", f"PathNotFound,{cmd}")
@@ -6206,6 +6229,10 @@ def jv_hack_yourself(heal=True):
         out()
         return
     out(f"[!] {problems} weakness(es) found.", RED)
+    for (func, line), (label, kind, msg) in crashes.items():
+        out(f"    crash    : {func}() line {line}: {kind}: {safe(msg)}   <- {safe(label)}", RED)
+    for label in hangs:
+        out(f"    hang     : {safe(label)}  (did not answer within 3 s)", JV_SEC_A)
     new_src, applied, manual = jv_hack_heal(src, found, crashes)
     for a in applied:
         out(f"    will fix : {safe(a)}", JV_SEC_G)
