@@ -19,11 +19,18 @@
 Run:  python pwsh.py      (Windows: double-click START.bat)
 Type  help  or just talk to it:  "find my games", "scan this PC for corrupt files".
 
-Everything here is READ-ONLY: nothing is ever written, moved, executed or deleted.
+All the file tools are READ-ONLY: they never write, move, execute or delete your files.
+The ONLY thing JARVIS ever writes is its own program (pwsh.py) plus the folders
+updates/ and backups/ next to it, and only through the self-update system:
+    maintenance            health check + validation of pending updates (changes nothing)
+    maintenance -Prepare   make updates/pwsh_next.py (a copy with the version bumped)
+    implement jarvis       validate the newest update in updates/ and install it
+    implement jarvis -DryRun | -Rollback | <file>
 Optional: pip install psutil  (live memory/CPU of a running game in pluton.key).
 Optional extensions: put .py files in a folder named ext/ next to this file.
 """
 
+import ast
 import codecs
 import difflib
 import errno
@@ -36,12 +43,14 @@ import pathlib
 import random
 import re
 import runpy
+import shlex
 import shutil
 import sqlite3
 import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 import zlib
@@ -1589,8 +1598,8 @@ def jarvis_status(intro="Systems nominal, sir"):
 
 def jarvis_greeting():
     jarvis_say(f"JARVIS online. {part_of_day()}, sir.")
-    jarvis_say("Hunter, game locator, file inspector and resource monitor are standing by. "
-               "Everything I do is read-only.")
+    jarvis_say(f"Hunter, game locator, file inspector and resource monitor are standing by (v{__version__}). "
+               "Your files are only ever read. I write nothing but my own updates, on 'implement jarvis'.")
     jarvis_status("Current status")
     jarvis_say('Type "help" for commands, or just tell me what you need: '
                '"find my games", "scan this PC for corrupt files".')
@@ -1623,6 +1632,14 @@ def jarvis_interpret(texto):
         return True
     if has("how are you", "come stai"):
         jarvis_say("Operating at full capacity, sir. Thank you for asking.")
+        return True
+    if has("maintenance", "manutenzione", "update yourself", "self-update", "self update",
+           "aggiornati", "autoaggiorn", "check for updates", "controlla aggiornamenti"):
+        ack("Running maintenance: health check and pending updates.")
+        esegui("maintenance")
+        return True
+    if re.match(r"implement\s+jarvis\b", t):
+        esegui(orig)
         return True
     if has("status", "stato"):
         jarvis_status()
@@ -1721,6 +1738,581 @@ def jarvis_cmd(args):
                    "'select <file>' or 'help'.")
 
 
+# ======================= SELF-UPDATE (maintenance + implement jarvis) =======================
+# The ONLY code allowed to touch the disk or start processes lives in the functions listed in
+# WRITER_FUNCS / PROC_FUNCS below. Every candidate update is checked by the static rules
+# (rule_violations) and run through a self-test BEFORE it can replace this file. These checks are
+# guardrails against mistakes, not a sandbox: only install updates you trust.
+__version__ = "1.1.0"
+
+APP_PATH = os.path.abspath(__file__)
+APP_DIR = os.path.dirname(APP_PATH)
+UPD_DIR = os.path.join(APP_DIR, "updates")
+BAK_DIR = os.path.join(APP_DIR, "backups")
+MAX_UPDATE = 5 * 1024 * 1024
+CONFIRM_SECONDS = 10
+SELFTEST_TIMEOUT = 30
+
+REQUIRED_FUNCS = {"main", "esegui", "cmdlet", "jarvis_interpret", "static_checks", "rule_violations",
+                  "validate_update", "apply_update", "restore_backup", "jarvis_implement",
+                  "reject_and_respawn", "selftest"}
+REQUIRED_CMDLETS = {"extract.port", "interact.port", "denux.hunter", "undersopic.key", "pluton.key",
+                    "Jarvis", "Implement", "Maintenance", "Get-Help", "Exit"}
+BANNED_IMPORTS = {"socket", "urllib", "urllib2", "http", "ftplib", "smtplib", "telnetlib", "requests",
+                  "xmlrpc", "ssl", "webbrowser", "pickle", "marshal", "importlib", "imp", "builtins"}
+BANNED_CALLS = {"eval", "exec", "compile", "__import__"}
+BANNED_PAIRS = {("os", "system"), ("os", "popen"), ("os", "startfile"), ("shutil", "rmtree")}
+FS_MUTATORS = {("os", "remove"), ("os", "unlink"), ("os", "rmdir"), ("os", "removedirs"),
+               ("os", "replace"), ("os", "rename"), ("os", "makedirs"), ("os", "mkdir"),
+               ("os", "chmod"), ("os", "truncate"), ("shutil", "copy"), ("shutil", "copy2"),
+               ("shutil", "copyfile"), ("shutil", "move"), ("shutil", "copytree")}
+FS_ATTRS = {"unlink", "write_text", "write_bytes", "rmdir", "touch", "mkdir", "rename"}
+PROC_OS = {"_exit", "execv", "execl", "execvp", "execlp", "spawnl", "spawnv"}
+GUARDED_ROOTS = {"os", "shutil", "subprocess"}
+WRITER_FUNCS = {"write_atomic", "apply_update", "restore_backup", "archive_candidate",
+                "discard_candidate", "prepare_candidate", "selftest_candidate"}
+PROC_FUNCS = {"battery_info", "selftest_candidate", "respawn_window", "restart_same_window"}
+
+
+def file_sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest().upper()
+
+
+def ver_tuple(s):
+    return tuple(int(x) for x in s.split("."))
+
+
+class _RuleVisitor(ast.NodeVisitor):
+    """Collects every construct a JARVIS update is not allowed to contain."""
+
+    def __init__(self):
+        self.bad, self.stack = [], []
+
+    def where(self):
+        return self.stack[0] if self.stack else "<module>"
+
+    def add(self, node, why):
+        self.bad.append(f"line {getattr(node, 'lineno', '?')}: {why}")
+
+    def visit_FunctionDef(self, node):
+        self.stack.append(node.name)
+        self.generic_visit(node)
+        self.stack.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Import(self, node):
+        for a in node.names:
+            root = a.name.split(".")[0]
+            if root in BANNED_IMPORTS:
+                self.add(node, f"forbidden module '{root}'")
+            if root in GUARDED_ROOTS and a.asname:
+                self.add(node, f"aliased import of '{root}'")
+
+    def visit_ImportFrom(self, node):
+        root = (node.module or "").split(".")[0]
+        if root in BANNED_IMPORTS:
+            self.add(node, f"forbidden module '{root}'")
+        elif root in GUARDED_ROOTS:
+            self.add(node, f"'from {root} import ...' is not allowed (use {root}.name)")
+
+    def visit_Call(self, node):
+        f, where = node.func, self.where()
+        if isinstance(f, ast.Name):
+            if f.id in BANNED_CALLS:
+                self.add(node, f"call to {f.id}()")
+            elif f.id == "open":
+                mode = node.args[1] if len(node.args) > 1 else next(
+                    (k.value for k in node.keywords if k.arg == "mode"), None)
+                if mode is not None and where not in WRITER_FUNCS:
+                    if not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)):
+                        self.add(node, "open() with a non-literal mode outside the update machinery")
+                    elif any(c in mode.value for c in "wax+"):
+                        self.add(node, f"open() for writing in '{where}'")
+        elif isinstance(f, ast.Attribute):
+            base = f.value.id if isinstance(f.value, ast.Name) else None
+            pair = (base, f.attr)
+            if pair in BANNED_PAIRS:
+                quiet = (pair == ("os", "system") and where == "main" and len(node.args) == 1
+                         and isinstance(node.args[0], ast.Constant) and node.args[0].value == "")
+                if not quiet:
+                    self.add(node, f"forbidden call {base}.{f.attr}()")
+            elif (pair in FS_MUTATORS or f.attr in FS_ATTRS) and where not in WRITER_FUNCS:
+                self.add(node, f"file modification '{f.attr}' in '{where}' (read-only code)")
+            elif (base == "subprocess" or (base == "os" and f.attr in PROC_OS)) and where not in PROC_FUNCS:
+                self.add(node, f"process control '{base}.{f.attr}' in '{where}'")
+        self.generic_visit(node)
+
+
+def rule_violations(tree):
+    v = _RuleVisitor()
+    v.visit(tree)
+    return v.bad
+
+
+def _declared_version(tree):
+    for n in tree.body:
+        if (isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                and n.targets[0].id == "__version__" and isinstance(n.value, ast.Constant)
+                and isinstance(n.value.value, str) and re.fullmatch(r"\d+(\.\d+){1,3}", n.value.value)):
+            return n.value.value
+    return None
+
+
+def static_checks(path, current_version=None):
+    """Phases 1-5 (nothing is executed). Returns [(phase, ok, detail)]."""
+    res = []
+    try:
+        size = os.path.getsize(path)
+        if size == 0 or size > MAX_UPDATE:
+            return [("File", False, f"size {human(size)} is not acceptable (max {human(MAX_UPDATE)})")]
+        with open(path, "rb") as f:
+            src = f.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        return [("File", False, f"cannot read it as UTF-8 text ({safe(e)})")]
+    res.append(("File", True, f"{human(size)}, UTF-8 text"))
+    try:
+        tree = ast.parse(src, filename=os.path.basename(path))
+    except (SyntaxError, ValueError, RecursionError) as e:
+        res.append(("Syntax", False, safe(e)))
+        return res
+    res.append(("Syntax", True, "valid Python"))
+
+    ver = _declared_version(tree)
+    if ver is None:
+        res.append(("Version", False, 'must declare  __version__ = "X.Y.Z"'))
+    elif current_version and ver_tuple(ver) <= ver_tuple(current_version):
+        res.append(("Version", False, f"{ver} is not newer than the installed {current_version}"))
+    else:
+        res.append(("Version", True, ver + (f" (installed: {current_version})" if current_version else "")))
+
+    funcs = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    cmds = set()
+    for n in tree.body:
+        if isinstance(n, ast.FunctionDef):
+            for d in n.decorator_list:
+                if (isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == "cmdlet"
+                        and d.args and isinstance(d.args[0], ast.Constant)):
+                    cmds.add(d.args[0].value)
+    guard = any(isinstance(n, ast.If) and isinstance(n.test, ast.Compare)
+                and isinstance(n.test.left, ast.Name) and n.test.left.id == "__name__" for n in tree.body)
+    missing = sorted(REQUIRED_FUNCS - funcs) + sorted("command " + c for c in REQUIRED_CMDLETS - cmds)
+    if not guard:
+        missing.append("the __main__ guard")
+    res.append(("Structure", not missing,
+                "all core functions, commands and safeguards are present" if not missing
+                else "missing: " + ", ".join(missing)))
+
+    bad = rule_violations(tree)
+    res.append(("Safety rules", not bad,
+                "no forbidden code" if not bad
+                else f"{len(bad)} violation(s):\n" + "\n".join(bad[:8]) + ("\n..." if len(bad) > 8 else "")))
+    return res
+
+
+def selftest_candidate(path):
+    """Phase 6: run the candidate's own --selftest in an isolated interpreter and a throw-away folder."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="jarvis_selftest_") as tmp:
+            dst = os.path.join(tmp, "pwsh.py")
+            with open(path, "rb") as s, open(dst, "wb") as d:
+                d.write(s.read())
+            r = subprocess.run([sys.executable, "-I", dst, "--selftest"], cwd=tmp, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=SELFTEST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return [("Self-test", False, f"timed out after {SELFTEST_TIMEOUT} s")]
+    except OSError as e:
+        return [("Self-test", False, f"could not run it ({safe(e)})")]
+    ok = r.returncode == 0 and "SELFTEST-OK" in r.stdout
+    if ok:
+        return [("Self-test", True, "the new version starts and passes its own checks")]
+    tail = (r.stderr.strip() or r.stdout.strip()).splitlines()[-4:]
+    return [("Self-test", False, safe(" | ".join(tail)) or f"exit code {r.returncode}")]
+
+
+def validate_update(path, require_newer=True):
+    """All six phases. The candidate is only EXECUTED (phase 6) if phases 1-5 passed."""
+    phases = static_checks(path, __version__ if require_newer else None)
+    if all(p[1] for p in phases):
+        phases += selftest_candidate(path)
+    return all(p[1] for p in phases), phases
+
+
+def selftest():
+    """Run by the update validator on a candidate:  python -I pwsh.py --selftest"""
+    problems = []
+    for n in REQUIRED_CMDLETS:
+        if n.lower() not in CMDLETS:
+            problems.append(f"command {n} is not registered")
+    if tokenize('a "b c"') != ["a", "b c"]:
+        problems.append("tokenize is broken")
+    if parse(["-Force", "x"]) != ({"-force"}, ["x"]):
+        problems.append("parse is broken")
+    if _declared_version(ast.parse('__version__ = "1.0"')) != "1.0":
+        problems.append("version reader is broken")
+    # canaries: the rule checker must still catch bad code and accept clean code
+    if not rule_violations(ast.parse("import socket\nos.remove('x')\neval('1')")):
+        problems.append("rule checker no longer detects forbidden code")
+    if rule_violations(ast.parse("x = 1\n")):
+        problems.append("rule checker rejects harmless code")
+    try:
+        mine = static_checks(APP_PATH)
+        problems += [f"{p[0]}: {p[2]}" for p in mine if not p[1]]
+    except Exception as e:
+        problems.append(f"static checks crashed: {e}")
+    if problems:
+        print("SELFTEST-FAIL: " + "; ".join(problems))
+        return 1
+    print("SELFTEST-OK")
+    return 0
+
+
+# ---- the only functions that write files or start processes ----
+def write_atomic(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def inside_updates(path):
+    p = os.path.normcase(os.path.realpath(path))
+    return p.startswith(os.path.normcase(os.path.realpath(UPD_DIR)) + os.sep)
+
+
+def archive_candidate(path, sub):
+    """Move a candidate from updates/ into updates/<sub>/ (kept, never deleted). Files elsewhere are left alone."""
+    if not inside_updates(path):
+        return None
+    folder = os.path.join(UPD_DIR, sub)
+    os.makedirs(folder, exist_ok=True)
+    dst = os.path.join(folder, datetime.now().strftime("%Y%m%d_%H%M%S_") + os.path.basename(path))
+    os.replace(path, dst)
+    return dst
+
+
+def discard_candidate(path):
+    """Delete a rejected candidate - only if it lives in updates/ (your other files are never touched)."""
+    if not inside_updates(path):
+        return False
+    os.remove(path)
+    return True
+
+
+def restore_backup(bak):
+    with open(bak, "rb") as f:
+        write_atomic(APP_PATH, f.read())
+
+
+def apply_update(src, label="update"):
+    """Back up the running version, install src, verify it, roll back on any problem. True on success."""
+    with open(src, "rb") as f:
+        new = f.read()
+    os.makedirs(BAK_DIR, exist_ok=True)
+    bak = os.path.join(BAK_DIR, f"pwsh_v{__version__}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.py")
+    shutil.copy2(APP_PATH, bak)
+    if file_sha(bak) != file_sha(APP_PATH):
+        out("Backup verification failed: nothing was changed.", RED)
+        return False
+    try:
+        write_atomic(APP_PATH, new)
+        broken = [p for p in static_checks(APP_PATH) if not p[1]]
+        if broken or file_sha(APP_PATH) != hashlib.sha256(new).hexdigest().upper():
+            raise OSError("the installed file did not verify")
+    except Exception as e:
+        restore_backup(bak)
+        out(f"Install failed ({safe(e)}): the previous version was restored from the backup.", RED)
+        return False
+    out(f"Backup of the old version: {safe(bak)}", GRAY)
+    if label == "update":
+        archive_candidate(src, "applied")
+    return True
+
+
+def prepare_candidate():
+    """Create updates/pwsh_next.py = this program with the patch number raised. Returns (path, version)."""
+    os.makedirs(UPD_DIR, exist_ok=True)
+    dst = os.path.join(UPD_DIR, "pwsh_next.py")
+    if os.path.exists(dst):
+        return None
+    with open(APP_PATH, "r", encoding="utf-8", newline="") as f:
+        src = f.read()
+    m = re.search(r'^__version__ = "(\d+)\.(\d+)\.(\d+)"', src, re.M)
+    if not m:
+        return None
+    new = f"{m[1]}.{m[2]}.{int(m[3]) + 1}"
+    with open(dst, "w", encoding="utf-8", newline="") as f:
+        f.write(src[:m.start()] + f'__version__ = "{new}"' + src[m.end():])
+    return dst, new
+
+
+def restart_same_window():
+    sys.stdout.write("\x1b[0m")
+    sys.stdout.flush()
+    if os.name == "nt":
+        os._exit(subprocess.call([sys.executable, APP_PATH]))
+    os.execv(sys.executable, [sys.executable, APP_PATH])
+
+
+def respawn_window():
+    """Open a brand-new window running JARVIS and close this one. No terminal found: restart in place."""
+    cmd, here, spawned = [sys.executable, APP_PATH], os.getcwd(), False
+    try:
+        if os.name == "nt":
+            subprocess.Popen(cmd, cwd=here, creationflags=0x00000010)      # CREATE_NEW_CONSOLE
+            spawned = True
+        elif sys.platform == "darwin":
+            line = "cd " + shlex.quote(here) + " && " + " ".join(shlex.quote(c) for c in cmd)
+            esc = line.replace("\\", "\\\\").replace('"', '\\"')
+            subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{esc}"'])
+            spawned = True
+        else:
+            for term in (["x-terminal-emulator", "-e"], ["gnome-terminal", "--"], ["konsole", "-e"],
+                         ["xfce4-terminal", "-e"], ["xterm", "-e"]):
+                if shutil.which(term[0]):
+                    subprocess.Popen(term + cmd, cwd=here)
+                    spawned = True
+                    break
+    except OSError:
+        spawned = False
+    if spawned:
+        sys.stdout.write("\x1b[0m")
+        sys.stdout.flush()
+        os._exit(0)
+    restart_same_window()
+
+
+# ---- the interactive parts ----
+def ask_timeout(seconds):
+    """Read one line, but give up after `seconds`. Returns the text, or None on timeout / end of input."""
+    sys.stdout.write("> ")
+    sys.stdout.flush()
+    end = time.monotonic() + seconds
+    if os.name == "nt":
+        import msvcrt
+        buf = ""
+        while time.monotonic() < end:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwche()
+                if ch in ("\r", "\n"):
+                    sys.stdout.write("\n")
+                    return buf
+                buf = buf[:-1] if ch == "\b" else buf + ch
+            else:
+                time.sleep(0.05)
+        sys.stdout.write("\n")
+        return None
+    import select
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            sys.stdout.write("\n")
+            return None
+        ready, _, _ = select.select([sys.stdin], [], [], left)
+        if ready:
+            line = sys.stdin.readline()
+            return line.rstrip("\r\n") if line else None
+
+
+def show_phases(phases):
+    for name, ok, detail in phases:
+        lines = detail.split("\n")
+        out(f"  [{' OK ' if ok else 'FAIL'}] {name.ljust(13)} {lines[0]}", GREEN if ok else RED)
+        for extra in lines[1:]:
+            out(" " * 22 + extra, RED)
+
+
+def pending_updates():
+    try:
+        names = [os.path.join(UPD_DIR, n) for n in os.listdir(UPD_DIR)
+                 if n.lower().endswith(".py") and os.path.isfile(os.path.join(UPD_DIR, n))]
+    except OSError:
+        return []
+    return sorted(names, key=os.path.getmtime, reverse=True)
+
+
+def list_backups():
+    try:
+        names = [os.path.join(BAK_DIR, n) for n in os.listdir(BAK_DIR)
+                 if n.startswith("pwsh_v") and n.endswith(".py")]
+    except OSError:
+        return []
+    return sorted(names, key=os.path.getmtime, reverse=True)
+
+
+def live_is_intact():
+    return all(p[1] for p in static_checks(APP_PATH))
+
+
+def reject_and_respawn(src, phases):
+    """A candidate broke the safety phases: self-destruct this window, open a fresh intact one."""
+    out()
+    out("UPDATE REJECTED: it does not respect the safety phases. The installed version was NOT touched.", RED)
+    show_phases(phases)
+    out()
+    jarvis_say("This window will now self-destruct and a fresh, intact JARVIS will open.")
+    jarvis_say(f"Type  delete  within {CONFIRM_SECONDS} seconds to also delete the rejected update; "
+               "otherwise it is kept in updates/rejected/.")
+    answer = ask_timeout(CONFIRM_SECONDS)
+    try:
+        if answer is not None and answer.strip().lower() == "delete":
+            if discard_candidate(src):
+                jarvis_say("Rejected update deleted.")
+            else:
+                jarvis_say("That file is not inside updates/, so I left it untouched.")
+        else:
+            kept = archive_candidate(src, "rejected")
+            jarvis_say("No 'delete' received: the rejected update is kept for inspection."
+                       if kept else "No 'delete' received. The file is outside updates/, left untouched.")
+    except OSError as e:
+        out(f"Could not clean up the rejected update ({safe(e)}).", YELLOW)
+    if not live_is_intact():
+        baks = list_backups()
+        if baks:
+            restore_backup(baks[0])
+            jarvis_say("The installed file looked damaged: restored from the latest backup.")
+    jarvis_say("Goodbye, sir. Back in a moment.")
+    respawn_window()
+
+
+def jarvis_implement(src=None, dry=False, allow_older=False):
+    """Validate an update and, if it passes every phase, install it (old version is backed up)."""
+    if src is None:
+        found = pending_updates()
+        if not found:
+            jarvis_say("There is no update in updates/, sir. Put the new pwsh.py there "
+                       "(or run  maintenance -Prepare  for a ready-made candidate).")
+            return
+        src = found[0]
+    if not os.path.isfile(src):
+        jarvis_say(f"I can't find the update file '{safe(src)}', sir.")
+        return
+    ack(f"Validating {safe(os.path.basename(src))} before touching anything.")
+    ok, phases = validate_update(src, require_newer=not allow_older)
+    out()
+    show_phases(phases)
+    out()
+    if not ok:
+        if dry or allow_older:
+            jarvis_say("That file does not pass the safety phases, sir. Nothing was changed.")
+            return
+        reject_and_respawn(src, phases)
+        return
+    if dry:
+        jarvis_say("All phases passed. Dry run: nothing was installed.")
+        return
+    if os.path.normcase(os.path.realpath(src)) == os.path.normcase(APP_PATH) or file_sha(src) == file_sha(APP_PATH):
+        jarvis_say("That is identical to the running version, sir. Nothing to do.")
+        return
+    jarvis_say("All phases passed. Installing, with a copy of the old version.")
+    if apply_update(src, "rollback" if allow_older else "update"):
+        jarvis_say("Update installed and verified. Restarting with the new version...")
+        out()
+        restart_same_window()
+
+
+@cmdlet("Implement", group="Assistant", usage="""implement jarvis                  validate the newest file in updates/ and install it if every phase passes
+implement jarvis <file>           same, for a specific file
+implement jarvis -DryRun          only validate, install nothing
+implement jarvis -Rollback        go back to the latest backup in backups/
+Phases: file, syntax, version (must be newer), structure, safety rules, self-test.
+If an update fails them, the window self-destructs and a fresh intact one opens
+(type delete within 10 seconds to also delete the rejected file).
+A copy of the old version is always kept in backups/.""")
+def implement_cmd(args):
+    """Install a JARVIS update after validating it (keeps a backup of the old version)"""
+    flags, pos = parse(args)
+    if not pos or pos[0].lower() != "jarvis":
+        out("Usage: implement jarvis [file] [-DryRun | -Rollback]", YELLOW)
+        out()
+        return
+    if "-rollback" in flags:
+        baks = list_backups()
+        if not baks:
+            jarvis_say("There is no backup to roll back to, sir.")
+            return
+        jarvis_implement(baks[0], allow_older=True)
+        return
+    src = " ".join(pos[1:]) if len(pos) > 1 else None
+    if src and not os.path.exists(src) and os.path.exists(os.path.join(UPD_DIR, src)):
+        src = os.path.join(UPD_DIR, src)
+    jarvis_implement(src, dry="-dryrun" in flags)
+
+
+@cmdlet("Maintenance", "update-jarvis", group="Assistant", usage="""maintenance             health check of JARVIS itself, extensions, backups and pending updates
+maintenance -Prepare    create updates/pwsh_next.py (this program, patch number +1) to edit and then install
+(maintenance never installs anything: use  implement jarvis )""")
+def maintenance_cmd(args):
+    """JARVIS self-check: health, real system data, backups and pending updates"""
+    flags, _ = parse(args)
+    if "-prepare" in flags:
+        made = prepare_candidate()
+        if made:
+            jarvis_say(f"Candidate created: {safe(made[0])}  (version {made[1]}). Edit it, then run  implement jarvis.")
+        else:
+            jarvis_say("I could not create updates/pwsh_next.py (it already exists, or the version line is missing).")
+        return
+    out()
+    out(f"JARVIS v{__version__}", CYAN)
+    out(f"  {safe(APP_PATH)}", GRAY)
+    try:
+        out(f"  SHA256 {file_sha(APP_PATH)}", GRAY)
+    except OSError:
+        pass
+    out()
+    out("HEALTH OF THE INSTALLED FILE", YELLOW)
+    show_phases(static_checks(APP_PATH))
+    out()
+    ext = os.path.join(APP_DIR, "ext")
+    if os.path.isdir(ext):
+        out("EXTENSIONS (ext/)", YELLOW)
+        for n in sorted(os.listdir(ext)):
+            if n.endswith(".py") and not n.startswith("_"):
+                try:
+                    with open(os.path.join(ext, n), "rb") as f:
+                        ast.parse(f.read())
+                    out(f"  [ OK ] {safe(n)}", GREEN)
+                except (OSError, SyntaxError, ValueError) as e:
+                    out(f"  [FAIL] {safe(n)}: {safe(e)}", RED)
+        out()
+    out("SYSTEM (real data)", YELLOW)
+    jarvis_status("Right now")
+    try:
+        du = shutil.disk_usage(APP_DIR)
+        out(f"  Disk with JARVIS      : {human(du.free)} free of {human(du.total)}")
+    except OSError:
+        pass
+    try:
+        import psutil  # noqa: F401
+        out("  psutil                : installed (live memory/CPU available)")
+    except ImportError:
+        out("  psutil                : not installed (pip install psutil for live memory/CPU)", GRAY)
+    out(f"  Python                : {sys.version.split()[0]}")
+    out()
+    baks = list_backups()
+    out("BACKUPS", YELLOW)
+    out(f"  {len(baks)} backup(s)" + (f", latest: {safe(os.path.basename(baks[0]))}" if baks else ""))
+    out()
+    pend = pending_updates()
+    out("PENDING UPDATES (updates/)", YELLOW)
+    if not pend:
+        out("  none")
+    for p in pend:
+        ok, phases = validate_update(p)
+        out(f"  {safe(os.path.basename(p))}: " + ("READY - run  implement jarvis" if ok else "would be REJECTED"),
+            GREEN if ok else RED)
+        if not ok:
+            show_phases([x for x in phases if not x[1]])
+    out()
+
+
 # ---------------- PARSER E LOOP ----------------
 def tokenize(riga):
     token, cur, q, ha = [], "", None, False
@@ -1803,6 +2395,8 @@ def prompt():
 
 
 def main():
+    if "--selftest" in sys.argv[1:]:
+        raise SystemExit(selftest())
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
