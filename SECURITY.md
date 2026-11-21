@@ -9,12 +9,11 @@ in this repository for history only.
 
 Please do not open a public issue for a security problem.
 
-Use GitHub's private reporting instead: open the **Security** tab of this
-repository and choose **Report a vulnerability**. Describe what you found, which
-version you used and, if you can, how to reproduce it.
+Use GitHub's private reporting: open the **Security** tab of this repository and
+choose **Report a vulnerability**. You can also write to **DreeMux.dev@gmail.com**.
+Describe what you found, which version you used and, if you can, how to reproduce it.
 
-This is a small hobby project, so replies may take a few days. Reports that
-include a clear way to reproduce the problem are the easiest to fix.
+This is a small hobby project, so replies may take a few days.
 
 ## Things worth knowing about this project
 
