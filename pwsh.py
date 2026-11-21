@@ -16,6 +16,8 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 """pwsh.py - Jarvis PowerShell: a Windows-PowerShell-style shell with a read-only file assistant.
 
+Author: DreeMux
+
 Run:  python pwsh.py      (Windows: double-click START.bat)
 Type  help  or just talk to it:  "find my games", "scan this PC for corrupt files".
 
@@ -166,6 +168,7 @@ def mode_string(path, nome, e_dir):
     return "".join(m)
 
 
+# >>>>> JARVIS-PART 02_basic_cmdlets_helpers.py >>>>>
 # ---------------- CMDLET ----------------
 @cmdlet("Get-ChildItem", "dir", "ls", "gci")
 def get_childitem(args):
@@ -562,6 +565,7 @@ def pick(args, cmd):
     return None
 
 
+# >>>>> JARVIS-PART 03_extract_interact.py >>>>>
 # ----------------------------- extract.port -----------------------------
 @cmdlet("extract.port", group="Port tools", usage="""extract.port <file>
 extract.port                 uses the file selected earlier with:  cd "<file>"
@@ -760,6 +764,7 @@ def interact_port(args):
     out()
 
 
+# >>>>> JARVIS-PART 04_denux_hunter.py >>>>>
 # ----------------------------- denux.hunter -----------------------------
 def check_zip(path):
     if not zipfile.is_zipfile(path):
@@ -1047,6 +1052,7 @@ def denux_hunter(args):
     out()
 
 
+# >>>>> JARVIS-PART 05_undersopic_key.py >>>>>
 # ----------------------------- undersopic.key -----------------------------
 GM_FILE = "data.win"
 
@@ -1278,6 +1284,7 @@ def undersopic_key(args):
     out()
 
 
+# >>>>> JARVIS-PART 06_pluton_key.py >>>>>
 # ----------------------------- pluton.key -----------------------------
 def count_folder(folder, cap=200000):
     files = dirs = size = 0
@@ -1534,6 +1541,7 @@ def pluton_key(args):
         out()
 
 
+# >>>>> JARVIS-PART 07_help.py >>>>>
 # ---------------- HELP ----------------
 DESCRIPTIONS = {
     "Get-ChildItem": "List files and folders (-Force also shows hidden ones)",
@@ -1669,6 +1677,7 @@ def jarvis_greeting():
     out()
 
 
+# >>>>> JARVIS-PART 08_deep_layer_finder_opener.py >>>>>
 # ---------- JARVIS deep layer: specific questions + opening files (everything READ-ONLY) ----------
 JV_PRON = {"it", "this", "that", "this file", "that file", "the file", "file", "selected", "selected file",
            "the selected file", "the same", "same file", "it again", "questo", "questo file", "quel file",
@@ -2272,6 +2281,7 @@ def jv_examples(t):
     return True
 
 
+# >>>>> JARVIS-PART 09_readers_type_handlers.py >>>>>
 # ---------------- extra readers (all read-only) ----------------
 def jv_gm_chunks(path):
     """[(chunk id, data start, data length)] of a GameMaker data file."""
@@ -3010,6 +3020,7 @@ def jv_file_q(orig, t, path, explicit):
     return False
 
 
+# >>>>> JARVIS-PART 10_folder_questions.py >>>>>
 # ---------------- folder-level questions ----------------
 def jv_filter(orig, t):
     """(predicate, description) from words like 'png files', '*.txt', 'named report', or None."""
@@ -3441,6 +3452,7 @@ JV_NAMED_RE = r"(?<![\w./\\-])jarvis(?![\w/\\-]|\.\w)"
 JV_NOT_NAMED_CMDS = ("jarvis", "implement", "implement-jarvis", "maintenance", "help", "get-help", "man", "exit", "quit")
 
 
+# >>>>> JARVIS-PART 11_brain_smalltalk.py >>>>>
 # ---------------- JARVIS brain: small talk, knowledge, typo repair, "again" ----------------
 JV_FILLER = {"yo", "hey", "hi", "hello", "hiya", "sup", "ok", "okay", "big", "bro", "brother", "buddy", "pal", "mate",
              "dude", "man", "my", "mister", "mr", "sir", "boss", "chief", "please", "pls", "just", "so", "then", "now",
@@ -3984,6 +3996,7 @@ JV_GAMES_KB.update({
 })
 
 
+# >>>>> JARVIS-PART 12_extract_key_local_ai.py >>>>>
 # ---------------- extract.key: a downloadable report about the selected file ----------------
 def jv_upd_export_file(text, base):
     """The ONLY place the report file is written: a brand-new text file (never overwrites anything),
@@ -4460,7 +4473,7 @@ def jv_know(orig, t):
 
     # --- who/what am I
     if re.search(r"\b(?:who (?:made|created|built|programmed|wrote) you|your (?:creator|maker|author)|chi ti ha (?:creato|fatto|programmato))\b", s):
-        say("I'm a Python program living in pwsh.py on your PC, sir, built one request at a time from your instructions. "
+        say("I was created by DreeMux, sir: a Python program living in pwsh.py, built one request at a time from his instructions. "
             "No cloud, no neural network inside me: I understand the phrases and patterns I was taught, which is why "
             "you can keep teaching me more.")
         return True
@@ -4654,6 +4667,7 @@ def jv_unwrap(orig):
     return orig
 
 
+# >>>>> JARVIS-PART 13_online_research.py >>>>>
 # ---------------- ONLINE mode: the sci-fi boot animation and the research command ----------------
 # 'jarvis be online' plays a spinning globe over five big square nodes that light up forward and back,
 # then Jarvis says he is online. While online, 'jarvis cerca <topic>' / 'jarvis research <topic>' brings back
@@ -5179,6 +5193,7 @@ def jv_research_cmd(orig, t, sel):
     return True
 
 
+# >>>>> JARVIS-PART 14_news.py >>>>>
 # ---------------- NEWS: 'jarvis news' (online mode) ----------------
 # Reads the RSS feeds of a short list of established news desks (ANSA, RaiNews, Il Post, Geopop, BBC, Al Jazeera),
 # keeps only what was published in the last 48 hours, groups the same story told by several desks, and prints it in
@@ -5571,6 +5586,7 @@ def jv_news_cmd(orig, t):
     return True
 
 
+# >>>>> JARVIS-PART 15_multi_intent_selfcheck.py >>>>>
 # ---------------- several things in ONE sentence: 'jarvis open chrome then gmail on account anna' ----------------
 # Splits the sentence into steps and hands each one to the browser mode above (jv_launch_browser), so every safety
 # rule stays there: only https pages, only while online, never files. All steps are checked BEFORE anything opens.
@@ -6410,6 +6426,7 @@ JV_LAUNCH_SKIP = ("unins", "uninstall", "setup", "install", "redist", "vcredist"
 JV_LAUNCH_CHAPTER = r"(?i)(?:chapter|capitolo|cap|ch)[ _.-]?(\d{1,2})(?:[ _-]?(?:windows|win|mac|macos|linux))?"
 
 
+# >>>>> JARVIS-PART 16_update_engine.py >>>>>
 # ---------------- paths, log ----------------
 def jv_upd_dir():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_update")
@@ -7104,6 +7121,7 @@ def jv_upd_show_report():
     out(f"  The previous version is saved in {safe(rep.get('backup', '?'))}", GRAY)
 
 
+# >>>>> JARVIS-PART 17_implement_jarvis.py >>>>>
 # ---------------- implement jarvis ----------------
 @cmdlet("Implement", "Implement-Jarvis", group="Assistant", usage="""implement jarvis                      update myself: maintenance build with real data from this PC (or the file waiting in jarvis_update/incoming/)
 implement jarvis <file.py>           install that file as the new Jarvis
@@ -7257,6 +7275,7 @@ def jv_upd_cmd(args):
             jv_upd_discard(work)
 
 
+# >>>>> JARVIS-PART 18_maintenance.py >>>>>
 # ---------------- maintenance (read-only health check) ----------------
 def jv_upd_secline():
     """One compact line about the security state of this file, or None when it cannot be read."""
@@ -8463,6 +8482,7 @@ def jv_launch_search(phrase, limit=60):
     return True
 
 
+# >>>>> JARVIS-PART 19_browser_mode.py >>>>>
 # ---------------- browser mode: 'jarvis open chrome', then 'open email', 'open canva', 'open chrome account <name>' ----------------
 # Only opens web pages (https) in Chrome, on request, while Jarvis is online. It never types, clicks, reads pages or passwords.
 JV_LAUNCH_SITES = {
@@ -9046,6 +9066,7 @@ def jv_launch_try(rest):
     return True
 
 
+# >>>>> JARVIS-PART 20_voice.py >>>>>
 # ---------------- VOICE (optional): JARVIS speaks only when you ask ----------------
 # 'voice on' makes JARVIS read his own lines aloud, 'voice off' silences him. Every session starts SILENT.
 # It uses pyttsx3 (pip install pyttsx3): free, local and offline - it only talks to the speech engine of this PC
@@ -9391,6 +9412,7 @@ def jv_launch_nl(orig):
     return True
 
 
+# >>>>> JARVIS-PART 21_parser_logo_main.py >>>>>
 # ---------------- PARSER E LOOP ----------------
 def tokenize(riga):
     token, cur, q, ha = [], "", None, False
@@ -9699,7 +9721,7 @@ def main():
     sys.stdout.write("\x1b]0;Jarvis PowerShell\x07" + BG + TEXT + "\x1b[2J\x1b[H")
     jv_logo_show()
     out("Jarvis PowerShell")
-    out("Copyright (C) Jarvis. All rights reserved.")
+    out("Copyright (C) DreeMux. Licensed under the GNU GPL v3 or later.")
     out()
     carica_estensioni()
     jarvis_greeting()
