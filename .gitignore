@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+
+# Jarvis runtime data: logs, heartbeats, settings, backups, reports (personal, recreated automatically)
+jarvis_update/
+jarvis_exports/
+backup/
+*.log
+*.hb
+screenwatch.json
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
