@@ -164,6 +164,12 @@ Jarvis PowerShell is a learning project by **DreeMux**, written with the help of
 
 It is not affiliated with or endorsed by Microsoft (Windows PowerShell), Marvel or Disney (the name J.A.R.V.I.S.), Anthropic (Claude Code) or any game publisher. Early versions imitate the Windows PowerShell start-up banner, for look and feel only.
 
+## Found a bug?
+
+Please open an [issue](https://github.com/DreeMux/Jarvis-PowerShell/issues), or write to
+**DreeMux.dev@gmail.com**. Tell me which version you use, what you typed and what
+happened. Thank you!
+
 ## License
 
 Copyright (C) 2026 DreeMux
