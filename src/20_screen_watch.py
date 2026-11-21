@@ -1,13 +1,17 @@
 # ---------------- SCREEN WATCH: "is someone watching my screen?" ----------------
-# Every few seconds (Windows only) Jarvis READS four things: the session list (qwinsta), the open connections (netstat),
+# Four times a second (Windows only, through Windows' own APIs: about 2 ms a look) Jarvis READS four things: the session list (qwinsta), the open connections (netstat),
 # the process list (tasklist) and the titles of the visible windows. Nothing on the PC is changed.
 # When a Remote Desktop / VNC / remote-help / screen-sharing session shows up, Jarvis pauses at its next output (JV_RUN),
 # a red WARNING window tells you who or what it is (names come from your list of known people: 'watch know'),
 # an optional e-mail goes to YOU, and if you press F the viewer sees a SIMULATED intrusion screen (text and colours only).
 # Safety nets: the pause always ends (window closed, window failed to open, or the time limit), see jv_watch_alert_run.
 JV_WATCH = {"daemon": False, "on": True, "thread": None, "stop": threading.Event(), "seen": set(), "alert": False,
-            "interval": 5, "last": [], "api": None, "shield": {"hidden": set(), "sent": {}},
-            "shield_lock": threading.Lock()}
+            "interval": 0.25, "last": [], "api": None, "shield": {"hidden": set(), "sent": {}},
+            "shield_lock": threading.Lock(), "wake": threading.Event(), "seen_t": 0.0, "beat_t": {}, "slow": None,
+            "cfg": {}, "cfg_t": 0.0, "native": None, "native_done": False}
+JV_WATCH_FAST = 0.25      # how often to look when the native (instant) look works: 4 times a second
+JV_SHIELD_TICK = 0.05     # the shield re-checks the windows 20 times a second while somebody is watching
+JV_SHIELD_HOLD = 1.5      # seconds the shield stays up after the viewer's last sign (no flicker if a sign blinks)
 JV_WATCH_FILE = "screenwatch.json"
 JV_WATCH_PORTS = {3389: "Remote Desktop (RDP)", 5900: "VNC", 5901: "VNC", 5800: "VNC (web)"}
 # process name -> what it means. Only programs that run WHILE a session is going on (not the always-on background service).
@@ -35,8 +39,27 @@ def jv_watch_cfg():
         return {}
 
 
+def jv_watch_cfg_cached(ttl=1.0):
+    """The settings, re-read at most once per 'ttl' seconds (the fast loops use this instead of reading the file 4 times a second)."""
+    st = JV_WATCH
+    if time.time() - st["cfg_t"] > ttl:
+        st["cfg"], st["cfg_t"] = jv_watch_cfg(), time.time()
+    return st["cfg"]
+
+
+def jv_watch_interval(cfg):
+    """Seconds between two looks: 0.2 - 300, default 0.25. A value saved by an older version (no 'interval_v') is ignored,
+    so that the old 5 s default does not slow the new fast look down."""
+    try:
+        v = float(cfg.get("interval")) if cfg.get("interval_v") == 2 else JV_WATCH_FAST
+    except (TypeError, ValueError):
+        v = JV_WATCH_FAST
+    return min(max(v, 0.2), 300.0)
+
+
 def jv_watch_save(cfg):
     """The only file this feature writes: its own tiny settings file. True when saved."""
+    JV_WATCH["cfg_t"] = 0.0
     try:
         os.makedirs(jv_upd_dir(), exist_ok=True)
         with open(os.path.join(jv_upd_dir(), JV_WATCH_FILE), "w", encoding="utf-8") as f:
@@ -142,23 +165,210 @@ def jv_watch_windows():
         return []
 
 
+def jv_watch_tcp_rows(buf, v6, ports=JV_WATCH_PORTS):
+    """Raw Windows TCP table (GetExtendedTcpTable, owner-pid layout) -> [(port, remote host)] of the ESTABLISHED incoming
+    connections on the remote-control ports. Same rules as jv_watch_parse_netstat: listening sockets, loopback and
+    half-open / closing connections are ignored. Pure (no Windows needed), so it can be tested anywhere."""
+    import ipaddress
+    import struct
+    fmt = "<16sII16sIIII" if v6 else "<6I"
+    size = struct.calcsize(fmt)
+    res, seen = [], set()
+    count = struct.unpack_from("<I", buf, 0)[0]
+    for i in range(min(count, (len(buf) - 4) // size)):
+        row = struct.unpack_from(fmt, buf, 4 + i * size)
+        if v6:
+            _, _, lport, raddr, _, rport, state, _ = row
+            host = ipaddress.IPv6Address(raddr)
+            if host.ipv4_mapped is not None:
+                host = host.ipv4_mapped
+        else:
+            state, _, lport, raddr, rport, _ = row
+            host = ipaddress.IPv4Address(struct.pack("<I", raddr))
+        port = ((lport & 255) << 8) | ((lport >> 8) & 255)            # the table keeps ports in network byte order
+        if state != 5 or port not in ports or not (rport & 0xFFFF) or host.is_loopback or host.is_unspecified:
+            continue
+        if (port, str(host)) not in seen:
+            seen.add((port, str(host)))
+            res.append((port, str(host)))
+    return res
+
+
+def jv_watch_native():
+    """The FAST read-only look: Windows' own APIs instead of starting qwinsta / netstat / tasklist (about 2 ms instead of
+    0.5 - 2 s). Returns an object with sessions() / tcp() / procs(), or None. Each of them returns None when it fails
+    (and is then not tried again): the caller falls back to the old command for that one."""
+    st = JV_WATCH
+    if st["native_done"]:
+        return st["native"]
+    st["native_done"] = True
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        import types
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32")
+        iph = ctypes.WinDLL("iphlpapi")
+        wts = ctypes.WinDLL("wtsapi32")
+        bad = set()
+
+        class PE32(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
+                        ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                        ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                        ("szExeFile", ctypes.c_wchar * 260)]
+
+        class WSI(ctypes.Structure):
+            _fields_ = [("SessionId", wintypes.DWORD), ("pWinStationName", wintypes.LPWSTR), ("State", ctypes.c_int)]
+        k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PE32)]
+        k32.Process32FirstW.restype = wintypes.BOOL
+        k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PE32)]
+        k32.Process32NextW.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        iph.GetExtendedTcpTable.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), wintypes.BOOL,
+                                            wintypes.ULONG, ctypes.c_int, wintypes.ULONG]
+        iph.GetExtendedTcpTable.restype = wintypes.DWORD
+        wts.WTSEnumerateSessionsW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                                              ctypes.POINTER(ctypes.POINTER(WSI)), ctypes.POINTER(wintypes.DWORD)]
+        wts.WTSEnumerateSessionsW.restype = wintypes.BOOL
+        wts.WTSQuerySessionInformationW.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_int,
+                                                    ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(wintypes.DWORD)]
+        wts.WTSQuerySessionInformationW.restype = wintypes.BOOL
+        wts.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+        wts.WTSFreeMemory.restype = None
+
+        def procs():
+            h = k32.CreateToolhelp32Snapshot(2, 0)                          # TH32CS_SNAPPROCESS
+            if not h or h == ctypes.c_void_p(-1).value:
+                raise OSError("process snapshot failed")
+            names = set()
+            try:
+                e = PE32()
+                e.dwSize = ctypes.sizeof(PE32)
+                ok = k32.Process32FirstW(h, ctypes.byref(e))
+                while ok:
+                    names.add(e.szExeFile.lower())
+                    ok = k32.Process32NextW(h, ctypes.byref(e))
+            finally:
+                k32.CloseHandle(h)
+            return names
+
+        def table(family):
+            size = wintypes.DWORD(0)
+            iph.GetExtendedTcpTable(None, ctypes.byref(size), False, family, 5, 0)     # TCP_TABLE_OWNER_PID_ALL: asks the size
+            for _ in range(5):                                                         # the table can grow between the calls
+                buf = (ctypes.c_ubyte * (size.value + 512))()
+                size.value = len(buf)
+                r = iph.GetExtendedTcpTable(buf, ctypes.byref(size), False, family, 5, 0)
+                if r == 0:
+                    return buf
+                if r != 122:                                                           # ERROR_INSUFFICIENT_BUFFER: try again
+                    raise OSError("GetExtendedTcpTable %d" % r)
+            raise OSError("GetExtendedTcpTable: table keeps growing")
+
+        def tcp():
+            return jv_watch_tcp_rows(table(2), False) + jv_watch_tcp_rows(table(23), True)    # AF_INET + AF_INET6
+
+        def sessions():
+            lst, n = ctypes.POINTER(WSI)(), wintypes.DWORD(0)
+            if not wts.WTSEnumerateSessionsW(None, 0, 1, ctypes.byref(lst), ctypes.byref(n)):
+                raise OSError("WTSEnumerateSessions failed")
+            res = []
+            try:
+                for i in range(n.value):
+                    name = (lst[i].pWinStationName or "").lower()
+                    if not name.startswith("rdp-tcp#"):                                # only a connected remote session has this name
+                        continue
+                    buf, ln = wintypes.LPWSTR(), wintypes.DWORD(0)
+                    user = ""
+                    if wts.WTSQuerySessionInformationW(None, lst[i].SessionId, 5, ctypes.byref(buf), ctypes.byref(ln)):   # WTSUserName
+                        user = buf.value or ""
+                        wts.WTSFreeMemory(ctypes.cast(buf, ctypes.c_void_p))
+                    if user:
+                        res.append((name, user, str(lst[i].SessionId)))
+            finally:
+                wts.WTSFreeMemory(ctypes.cast(lst, ctypes.c_void_p))
+            return res
+
+        def safe(name, fn):
+            def run():
+                if name in bad:
+                    return None
+                try:
+                    return fn()
+                except Exception:
+                    bad.add(name)
+                    return None
+            return run
+        st["native"] = types.SimpleNamespace(procs=safe("procs", procs), tcp=safe("tcp", tcp),
+                                             sessions=safe("sessions", sessions))
+    except Exception:
+        st["native"] = None
+    return st["native"]
+
+
 def jv_watch_scan():
-    """One look at the system -> list of {tag, what, remote, user, name} (empty = nobody watching)."""
+    """One look at the system -> list of {tag, what, remote, user, name} (empty = nobody watching).
+    Fast path: Windows' own APIs (a few ms). A source that cannot be read that way falls back to its old command
+    (qwinsta / netstat / tasklist), and then JV_WATCH['slow'] is True: the loops look less often (every 2 s at most)."""
     if os.name != "nt":
         return []
+    nat = jv_watch_native()
+    slow = False
+    sess = nat.sessions() if nat else None
+    if sess is None:
+        sess, slow = jv_watch_parse_sessions(jv_watch_run(["qwinsta"])), True
+    conns = nat.tcp() if nat else None
+    if conns is None:
+        conns, slow = jv_watch_parse_netstat(jv_watch_run(["netstat", "-ano", "-p", "tcp"])), True
+    names = nat.procs() if nat else None
+    if names is None:
+        tasks, slow = jv_watch_parse_tasks(jv_watch_run(["tasklist", "/fo", "csv", "/nh"])), True
+    else:
+        tasks = [(n, JV_WATCH_TOOLS[n]) for n in sorted(names & set(JV_WATCH_TOOLS))]
+    JV_WATCH["slow"] = slow
     items = []
-    for sess, user, sid in jv_watch_parse_sessions(jv_watch_run(["qwinsta"])):
-        items.append({"tag": "sess:" + sess, "what": f"Remote Desktop session {sess} (user {user})", "remote": "", "user": user})
-    for port, ip in jv_watch_parse_netstat(jv_watch_run(["netstat", "-ano", "-p", "tcp"])):
+    for sess_name, user, sid in sess:
+        items.append({"tag": "sess:" + sess_name, "what": f"Remote Desktop session {sess_name} (user {user})", "remote": "", "user": user})
+    for port, ip in conns:
         items.append({"tag": f"net:{ip}:{port}", "what": f"{JV_WATCH_PORTS[port]} connection on port {port}", "remote": ip, "user": ""})
-    for proc, meaning in jv_watch_parse_tasks(jv_watch_run(["tasklist", "/fo", "csv", "/nh"])):
+    for proc, meaning in tasks:
         items.append({"tag": "proc:" + proc, "what": meaning, "remote": "", "user": ""})
     for t in jv_watch_match_titles(jv_watch_windows()):
         items.append({"tag": "win:" + t.lower()[:80], "what": f"window: {t[:80]}", "remote": "", "user": ""})
-    cfg = jv_watch_cfg()
-    for it in items:
-        it["name"] = jv_watch_who(it, cfg)
+    if items:
+        cfg = jv_watch_cfg_cached()
+        for it in items:
+            it["name"] = jv_watch_who(it, cfg)
     return items
+
+
+def jv_watch_publish(items):
+    """Stores what the last look found and wakes the shield at once (it does not wait for its next tick)."""
+    st = JV_WATCH
+    st["last"] = items
+    if items:
+        st["seen_t"] = time.time()
+        st["wake"].set()
+    return items
+
+
+def jv_watch_present():
+    """True while somebody is watching (plus a short hold-over, so a sign that blinks does not make the windows flicker)."""
+    st = JV_WATCH
+    return bool(st["on"]) and (bool(st["last"]) or time.time() - st["seen_t"] < JV_SHIELD_HOLD)
+
+
+def jv_watch_warm():
+    """Loads tkinter in the background, so that the first WARNING window does not pay for the import."""
+    try:
+        import tkinter
+    except Exception:
+        pass
 
 
 def jv_watch_who(item, cfg):
@@ -342,32 +552,29 @@ def jv_watch_alert_run(items):
 
 def jv_watch_loop():
     st = JV_WATCH
-    jv_watch_beat("jarvis", st["interval"])
-    while not st["stop"].wait(max(2, int(st["interval"]))):
+    while True:
         try:
             jv_watch_beat("jarvis", st["interval"])      # tells the background guard "Jarvis is open and watching": the guard stays quiet
-            if not st["on"]:
-                continue
-            items = jv_watch_scan()
-            st["last"] = items
-            tags = {i["tag"] for i in items}
-            new = tags - st["seen"]
-            st["seen"] = tags                 # what ended is forgotten, so a later session alerts again
-            if new and not st["alert"]:
-                jv_watch_alert(items)
+            if st["on"]:
+                items = jv_watch_publish(jv_watch_scan())
+                tags = {i["tag"] for i in items}
+                new = tags - st["seen"]
+                st["seen"] = tags                 # what ended is forgotten, so a later session alerts again
+                if new and not st["alert"]:
+                    jv_watch_alert(items)
         except Exception:
-            pass                              # the watcher never dies because of one bad reading
+            pass                                  # the watcher never dies because of one bad reading
+        if st["stop"].wait(max(st["interval"], 2.0) if st["slow"] else st["interval"]):
+            break
 
 
 def jv_watch_start():
     st = JV_WATCH
     cfg = jv_watch_cfg()
     st["on"] = bool(cfg.get("on", True))
-    try:
-        st["interval"] = min(max(int(cfg.get("interval", 5)), 2), 300)
-    except (TypeError, ValueError):
-        st["interval"] = 5
+    st["interval"] = jv_watch_interval(cfg)
     if os.name == "nt" and st["thread"] is None:
+        threading.Thread(target=jv_watch_warm, daemon=True).start()
         st["thread"] = threading.Thread(target=jv_watch_loop, daemon=True)
         st["thread"].start()
         threading.Thread(target=jv_watch_shield_loop, args=(st["stop"],), daemon=True).start()
@@ -379,17 +586,18 @@ def jv_watch_start():
 
 def jv_watch_stop():
     JV_WATCH["stop"].set()
+    JV_WATCH["wake"].set()
     JV_RUN.set()
     jv_watch_shield_restore()                           # windows hidden by the shield come back when Jarvis closes
     jv_watch_beat("jarvis", 0, closed=True)             # Jarvis is closing: the background guard takes over at once
 
 
 # ---------------- the shield: while somebody is watching, Firefox disappears from the screen ----------------
-# As long as the watcher sees a viewer (see jv_watch_scan), every 0.3 s the windows of the shielded programs (default:
+# As long as the watcher sees a viewer (see jv_watch_scan), every 0.05 s the windows of the shielded programs (default:
 # firefox.exe) are hidden (mode 'hide'), minimised ('minimize') or asked to close ('close'). When the viewer is gone they
 # come back (mode 'hide'). Nothing is killed: 'hide' only takes the window off the screen, the program keeps running.
-# Honest limit: the viewer is noticed at the next look (every 'interval' s, see 'watch interval 2'), and a window that
-# opens while somebody is watching can be seen for a fraction of a second before the next 0.3 s tick.
+# Speed: the viewer is noticed at the next look (every 0.25 s), the watcher wakes the shield at once, and while somebody is
+# watching the shield re-checks the windows every 0.05 s, so a window that opens can be seen for ~0.05 s at most.
 JV_SHIELD_MODES = ("hide", "minimize", "close", "off")
 
 
@@ -499,25 +707,29 @@ def jv_watch_shield_step(api, mode, apps, present, state, now=None):
 
 
 def jv_watch_shield_loop(stop):
-    """Runs next to the watcher (Jarvis open) and inside the background guard."""
+    """Runs next to the watcher (Jarvis open) and inside the background guard. It sleeps on JV_WATCH['wake']: the watcher
+    wakes it the moment it sees a viewer, then it re-checks the windows every 0.05 s for as long as somebody is watching."""
     st = JV_WATCH
     api = st["api"] = st["api"] or jv_watch_winapi()
     if api is None:
         return
     mode, apps, t_cfg, quiet = "hide", {"firefox.exe"}, 0.0, False
-    while not stop.wait(0.3):
+    while not stop.is_set():
         try:
-            if time.time() - t_cfg > 2:                            # settings are re-read every 2 s ('watch shield ...' is live)
+            if time.time() - t_cfg > 1:                            # settings are re-read every second ('watch shield ...' is live)
                 mode, apps = jv_watch_shield_cfg(jv_watch_cfg())
                 quiet = bool(st["daemon"] and jv_watch_beat_alive("jarvis"))      # Jarvis open -> Jarvis does it, the guard stays out
                 t_cfg = time.time()
-            present = bool(st["on"] and st["last"]) and not quiet
+            present = jv_watch_present() and not quiet
             with st["shield_lock"]:
                 n = jv_watch_shield_step(api, mode, apps, present, st["shield"])
             if n > 0:
                 jv_upd_log(f"screen watch shield: {mode} {n} window(s) of {', '.join(sorted(apps))}")
+            busy = present or bool(st["shield"]["hidden"])
         except Exception:
-            pass                                                   # the shield never dies because of one bad tick
+            busy = False                                           # the shield never dies because of one bad tick
+        st["wake"].wait(JV_SHIELD_TICK if busy else 0.25)          # idle: sleeps (and is woken at once by a sighting)
+        st["wake"].clear()
 
 
 def jv_watch_shield_restore(everything=False):
@@ -576,20 +788,25 @@ JV_GUARD_NAME = "JarvisScreenWatch.vbs"
 
 
 def jv_watch_beat(name, interval, closed=False):
-    """Heartbeat file jarvis_update/<name>.hb : 'unix-time interval'. closed=True writes an already-old time."""
+    """Heartbeat file jarvis_update/<name>.hb : 'unix-time period'. Written at most once a second; closed=True writes an
+    already-old time (and is never skipped)."""
+    now = time.time()
+    if not closed and now - JV_WATCH["beat_t"].get(name, 0.0) < 1.0:
+        return
+    JV_WATCH["beat_t"][name] = now
     try:
         with open(os.path.join(jv_upd_sub("."), name + ".hb"), "w", encoding="utf-8") as f:
-            f.write(f"{0 if closed else time.time():.0f} {int(interval)}")
+            f.write(f"{0 if closed else now:.0f} {max(1, int(interval + 0.999))}")
     except OSError:
         pass
 
 
 def jv_watch_beat_alive(name):
-    """True when <name>.hb is fresh (written within about two of its own intervals)."""
+    """True when <name>.hb is fresh (written within about two of its own periods, 5 s for the fast look)."""
     try:
         with open(os.path.join(jv_upd_dir(), name + ".hb"), encoding="utf-8") as f:
             t, iv = f.read().split()[:2]
-        return time.time() - float(t) < 2 * max(int(iv), 2) + 10
+        return time.time() - float(t) < 2 * max(int(iv), 1) + 3
     except (OSError, ValueError):
         return False
 
@@ -688,16 +905,15 @@ def jv_watch_daemon(max_loops=None):
     except OSError:
         pass
     jv_upd_log("screen watch guard started (background)")
+    threading.Thread(target=jv_watch_warm, daemon=True).start()
     threading.Thread(target=jv_watch_shield_loop, args=(st["stop"],), daemon=True).start()
     n = 0
     while max_loops is None or n < max_loops:
         n += 1
         try:
-            cfg = jv_watch_cfg()
-            try:
-                st["interval"] = min(max(int(cfg.get("interval", 5)), 2), 300)
-            except (TypeError, ValueError):
-                st["interval"] = 5
+            cfg = jv_watch_cfg_cached()
+            st["interval"] = jv_watch_interval(cfg)
+            st["on"] = bool(cfg.get("on", True))
             jv_watch_beat("guard", st["interval"])
             if os.path.isfile(stop):
                 try:
@@ -705,18 +921,21 @@ def jv_watch_daemon(max_loops=None):
                 except OSError:
                     pass
                 break
-            if bool(cfg.get("on", True)):
-                items = jv_watch_scan()
-                st["last"] = items
+            if st["on"]:
+                items = jv_watch_publish(jv_watch_scan())
                 tags = {i["tag"] for i in items}
                 new = tags - st["seen"]
                 st["seen"] = tags
                 if new and not st["alert"] and not jv_watch_beat_alive("jarvis"):     # Jarvis open -> Jarvis alerts
                     jv_watch_alert(items)
+            else:
+                st["last"] = []
         except Exception:
             pass                                         # the guard never dies because of one bad reading
         if max_loops is None:
-            time.sleep(max(2, int(st["interval"])))
+            st["stop"].wait(max(st["interval"], 2.0) if st["slow"] else st["interval"])
+    st["stop"].set()
+    st["wake"].set()
     jv_watch_shield_restore()                            # the guard is closing: nothing stays hidden
     jv_watch_beat("guard", 0, closed=True)
     jv_upd_log("screen watch guard stopped")
@@ -753,7 +972,7 @@ def jv_watch_guard_cmd(rest, cfg):
 watch on | off                 switch the watch on or off (remembered)
 watch now                      look right now and say what was found
 watch test                     show the WARNING window as if someone were watching (nothing is really connected)
-watch interval <seconds>       how often to look (2-300, default 5)
+watch interval <seconds>       how often to look (0.2-300, default 0.25; decimals ok)
 watch know                     list the people you know
 watch know add <name> <ip-or-user>     e.g. watch know add Mario 192.168.1.20
 watch know del <name>
@@ -785,11 +1004,13 @@ def jv_watch_cmd_run(args):
     word = args[0].lower() if args else ""
     rest = args[1:]
     if not word:
-        jarvis_say(f"Screen watch is {'ON' if st['on'] else 'OFF'}, sir. I look every {st['interval']} s"
+        jarvis_say(f"Screen watch is {'ON' if st['on'] else 'OFF'}, sir. I look every {st['interval']:g} s"
                    + ("." if os.name == "nt" else " (but only on Windows)."))
         out(f"  known people : {len(cfg.get('known') or {})}", GRAY)
         out(f"  e-mail alert : {'to ' + cfg['mail_to'] if cfg.get('mail_to') else 'not set up'}", GRAY)
         out(f"  seen now     : {len(st['last'])} item(s)", GRAY)
+        if st["slow"] is not None:
+            out(f"  look method  : {'commands (slow: qwinsta / netstat / tasklist)' if st['slow'] else 'Windows API (instant)'}", GRAY)
         out()
     elif word in ("on", "off"):
         st["on"] = word == "on"
@@ -797,8 +1018,9 @@ def jv_watch_cmd_run(args):
         st["seen"] = set()
         jarvis_say(f"Screen watch {'on' if st['on'] else 'off'}, sir." + ("" if jv_watch_save(cfg) else " (could not save the setting)"))
     elif word == "now":
-        items = jv_watch_scan()
-        st["last"] = items
+        t0 = time.perf_counter()
+        items = jv_watch_publish(jv_watch_scan())
+        out(f"  (looked in {(time.perf_counter() - t0) * 1000:.0f} ms)", GRAY)
         if not items:
             jarvis_say("Nobody is watching the screen that I can see, sir." + ("" if os.name == "nt" else " (Windows only.)"))
         for line in jv_watch_lines(items)[2:]:
@@ -810,11 +1032,12 @@ def jv_watch_cmd_run(args):
         time.sleep(0.3)                       # the pause starts at the next output: wait here until the window is closed
         while not JV_RUN.wait(0.2):
             pass
-    elif word == "interval" and rest and rest[0].isdigit():
-        st["interval"] = min(max(int(rest[0]), 2), 300)
-        cfg["interval"] = st["interval"]
+    elif word == "interval" and rest and re.fullmatch(r"\d+(?:[.,]\d+)?", rest[0]):
+        cfg["interval"], cfg["interval_v"] = float(rest[0].replace(",", ".")), 2
+        st["interval"] = jv_watch_interval(cfg)
         jv_watch_save(cfg)
-        jarvis_say(f"I will look every {st['interval']} seconds, sir.")
+        jarvis_say(f"I will look every {st['interval']:g} seconds, sir." + (" (Not faster than every 2 s while the instant look is "
+                   "unavailable on this PC.)" if st["slow"] else ""))
     elif word == "know":
         known = cfg.get("known") if isinstance(cfg.get("known"), dict) else {}
         if rest and rest[0].lower() == "add" and len(rest) >= 3:
