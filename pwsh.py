@@ -14,7 +14,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""pwsh.py - JARVIS: a Windows-PowerShell-style shell with a read-only file assistant.
+"""pwsh.py - Jarvis PowerShell: a Windows-PowerShell-style shell with a read-only file assistant.
 
 Run:  python pwsh.py      (Windows: double-click START.bat)
 Type  help  or just talk to it:  "find my games", "scan this PC for corrupt files".
@@ -51,14 +51,14 @@ from datetime import datetime
 
 # ---------------- JARVIS DATA (only rewritten by 'implement jarvis' maintenance updates) ----------------
 # JV_DATA_BEGIN
-JV_DATA = {'version': 1, 'game_dirs': [], 'updated': ''}
+JV_DATA = {'version': 2, 'game_dirs': ['c:\\program files (x86)\\steam\\steamapps\\common\\DELTARUNEdemo'], 'updated': '2026-10-17 20:52'}
 # JV_DATA_END
 
 # ---------------- COLORI ORIGINALI (console Windows PowerShell) ----------------
 def fg(r, g, b): return f"\x1b[38;2;{r};{g};{b}m"
 def bg(r, g, b): return f"\x1b[48;2;{r};{g};{b}m"
 
-BG      = bg(1, 36, 86)          # #012456 blu PowerShell
+BG      = bg(0, 0, 0)            # nero
 TEXT    = fg(238, 237, 240)      # #EEEDF0 grigio chiaro
 YELLOW  = fg(255, 255, 0)        # comandi digitati (PSReadLine)
 RED     = fg(255, 0, 0)          # errori
@@ -3816,7 +3816,7 @@ def jv_upd_check(cand, want_sha):
             return bad(8, f"exit code {rc}: {(se or so).strip().splitlines()[-1][:120] if (se or so).strip() else 'no output'}")
         if "Traceback" in so or "Traceback" in se:
             return bad(8, "it printed a Python error on start")
-        if "Windows PowerShell" not in so:
+        if "Jarvis PowerShell" not in so:
             return bad(8, "it did not show the usual start screen")
         miss = [c for c in cur_canon if c not in so]
         if miss:
@@ -4644,12 +4644,9 @@ def main():
         except Exception:
             pass
     os.system("")  # abilita i codici ANSI sul terminale di Windows
-    sys.stdout.write("\x1b]0;Windows PowerShell\x07" + BG + TEXT + "\x1b[2J\x1b[H")
-    out("Windows PowerShell")
-    out("Copyright (C) Microsoft Corporation. All rights reserved.")
-    out()
-    out("Install the latest PowerShell for new features and improvements! "
-        "https://aka.ms/PSWindows")
+    sys.stdout.write("\x1b]0;Jarvis PowerShell\x07" + BG + TEXT + "\x1b[2J\x1b[H")
+    out("Jarvis PowerShell")
+    out("Copyright (C) Jarvis. All rights reserved.")
     out()
     carica_estensioni()
     jarvis_greeting()
