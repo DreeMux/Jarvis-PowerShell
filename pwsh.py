@@ -23,7 +23,8 @@ Everything here is READ-ONLY: nothing of yours is ever written, moved or deleted
 ask for explicitly go further: "implement jarvis" (updates this very file, after 9 safety checks and
 with a backup), "jarvis open <game>" (starts the game's own program) and "extract.key" (saves a NEW
 report file in Downloads). I also keep a list of sentences I did not understand (jarvis_update/).
-While online (jarvis be online), 'jarvis search <topic>' also asks Wikipedia (https, only the search words are sent).
+While online (jarvis be online): 'jarvis search <topic>' also asks Wikipedia (https, only the search words are sent), and
+'jarvis news' reads the RSS feeds of ANSA, RaiNews, Il Post, Geopop, BBC and Al Jazeera (https, read-only; photos need Pillow).
 Optional: pip install psutil  (live memory/CPU of a running game in pluton.key).
 Optional extensions: put .py files in a folder named ext/ next to this file.
 """
@@ -2217,7 +2218,8 @@ def jv_examples(t):
         ("MATHS / UNITS", 'calculate 15% of 80   |   2+2*3   |   square root of 144   |   convert 5 km to miles   |   100 f to c   |   2 gb in mb'),
         ("DATES", 'how many days until christmas   |   what day is 25/12/2026   |   days between 1/1/2026 and 1/3/2026'),
         ("CHAT", 'jarvis perfect   |   yo big jarvis   |   tell me a joke   |   how are you   |   again (repeats my last request)'),
-        ("ONLINE / RESEARCH", 'jarvis be online   |   jarvis cerca <topic>   |   jarvis research sha256   |   jarvis go offline'),
+        ("ONLINE / RESEARCH", 'jarvis be online   |   jarvis search <topic>   |   jarvis cerca <topic>   |   jarvis go offline'),
+        ("NEWS (online)", 'jarvis news   |   jarvis news war   |   jarvis notizie sulle proteste   (stories in parts, photo in ASCII + summary)'),
         ("SECURITY / UPDATE", 'security   |   implement jarvis   |   implement jarvis -Dry   |   implement jarvis <file.py>   |   go in maintenance'),
     ]
     w = max(len(a) for a, _ in rows)
@@ -3407,7 +3409,7 @@ JV_SUGGEST = ["find my games", "scan this PC for corrupt files", "open <file>", 
               "what time is it", "go in maintenance", "implement jarvis", "examples", "what is a dll",
               "calculate 15% of 80", "convert 5 km to miles", "how many days until christmas", "tell me a joke",
               "what does dir do", "tell me about undertale", "security status", "again", "what didn't you understand",
-              "be online", "cerca <topic>", "go offline"]
+              "be online", "cerca <topic>", "go offline", "news", "news war"]
 
 
 def jv_pick(*opts):
@@ -4861,7 +4863,7 @@ def jv_online_cmd(orig, t):
     out()
     out("  [ JARVIS ONLINE ]", GREEN)
     jarvis_say("I'm online, sir. All five nodes are linked: files, games, PC, brain and security.")
-    jarvis_say("Ask me anything with 'jarvis search <topic>' (or 'jarvis cerca <topic>') and I'll look it up on the web and in my own knowledge. "
+    jarvis_say("Ask me anything with 'jarvis search <topic>' and I'll look it up on the web, or say 'jarvis news' for the latest stories. "
                "Still read-only: I never change your files.")
     return True
 
@@ -5133,6 +5135,351 @@ def jv_research_cmd(orig, t, sel):
     return True
 
 
+# ---------------- NEWS: 'jarvis news' (online mode) ----------------
+# Reads the RSS feeds of a short list of established news desks (ANSA, RaiNews, Il Post, Geopop, BBC, Al Jazeera),
+# keeps only what was published in the last 48 hours, groups the same story told by several desks, and prints it in
+# parts: WAR, PROTESTS, everything else. Each story shows its photo as coloured ASCII art (needs: pip install pillow)
+# with the summary underneath. 'Verified' here means: published by these desks, recent, and marked when two or
+# more of them carry the same story. The only network door is jv_news_get (https, read-only, online mode only).
+JV_NEWS_FEEDS = (
+    ("ANSA", "https://www.ansa.it/sito/notizie/topnews/topnews_rss.xml"),
+    ("ANSA", "https://www.ansa.it/sito/ansait_rss.xml"),
+    ("RaiNews", "https://www.rainews.it/rss/ultimora"),
+    ("RaiNews", "https://www.rainews.it/rss/tutti"),
+    ("Il Post", "https://www.ilpost.it/feed/"),
+    ("Geopop", "https://www.geopop.it/feed/"),
+    ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
+    ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+)
+JV_NEWS_URLS = frozenset(u for _, u in JV_NEWS_FEEDS)
+JV_NEWS_MAX_AGE_H = 48
+JV_NEWS_WAR = re.compile(
+    r"\b(?:war|wars|warfare|guerr\w*|conflitt\w*|bombard\w*|missil\w*|militar\w*|ucrain\w*|ukrain\w*|gaza|israel\w*|"
+    r"hamas|hezbollah|russia|russo|russa|russi|russe|putin|zelensk\w*|drones?|dron[ei]|ceasefire|cessate il fuoco|tregua|"
+    r"truppe|troops|soldat\w*|nato|libano|lebanon|iran\w*|sudan|sirian\w*|syria\w*|houthi|airstrikes?|offensiv\w*|"
+    r"invasion\w*|invasione|esercit\w*|army|frontline|fronte)\b", re.I)
+JV_NEWS_PROTEST = re.compile(
+    r"\b(?:protest\w*|manifest\w*|corteo|cortei|sciopero|scioperi|general strike|walkout|rivolt\w*|dimostrant\w*|"
+    r"demonstrat\w*|riot\w*|picchett\w*|presidio|sit-in|scontri|disordini|unrest)\b", re.I)
+JV_NEWS_STOP = set("""the a an of in on at to for and or but is are was were be by with from as that this it its after before over
+under into about new says say said più meno della delle dello degli dell nella nelle nello negli sono stato stata stati
+state che per con una uno gli non dopo prima come anche tra fra sul sulla sulle sui dal dalla dalle dai cosa dove quando
+ancora ultime ultima oggi ieri video foto live""".split())
+
+
+def jv_news_get(url, kind="feed", limit=1500000):
+    """The only network door of the news reader: a read-only https GET. Feeds must be one of my listed sources;
+    pictures may come from any named https site (no IP addresses), only images, capped in size. Redirects must stay https."""
+    import ssl
+    import urllib.parse
+    import urllib.request
+    p = urllib.parse.urlparse(url)
+    host = (p.hostname or "").lower()
+    if p.scheme != "https" or not host or host == "localhost" or re.fullmatch(r"[\d.]+|[0-9a-f:]+", host):
+        raise ValueError("only https addresses of named sites")
+    if kind == "feed" and url not in JV_NEWS_URLS:
+        raise ValueError("not one of my news sources")
+
+    class Strict(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            q = urllib.parse.urlparse(newurl)
+            h = (q.hostname or "").lower()
+            if q.scheme != "https" or not h or h == "localhost" or re.fullmatch(r"[\d.]+|[0-9a-f:]+", h):
+                raise ValueError("redirect to a non-https or numeric address refused")
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    opener = urllib.request.build_opener(Strict, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; JARVIS-news/1.0; read-only)",
+        "Accept": "application/rss+xml, application/xml, text/xml, image/*;q=0.8, */*;q=0.5"})
+    with opener.open(req, timeout=7) as r:
+        if kind == "image" and not (r.headers.get("Content-Type") or "").lower().startswith("image/"):
+            raise ValueError("not an image")
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("too big")
+    return data
+
+
+def jv_news_parse_feed(raw, src):
+    """RSS 2.0 bytes -> [{'title','link','desc','ts','src','img'}]; refuses XML that declares entities."""
+    import html
+    import xml.etree.ElementTree as ET
+    from datetime import timezone
+    from email.utils import parsedate_to_datetime
+    if re.search(rb"<!ENTITY", raw[:50000], re.I):
+        raise ValueError("feed declares XML entities")
+    root = ET.fromstring(raw)
+
+    def clean(x):
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(x or ""))).strip()
+    items = []
+    for it in list(root.iter("item"))[:30]:
+        fields, img = {}, None
+        for el in it.iter():
+            tag = el.tag.rsplit("}", 1)[-1] if isinstance(el.tag, str) else ""
+            if tag in ("title", "link", "description", "encoded", "pubDate", "date") and tag not in fields:
+                fields[tag] = el.text or ""
+            if tag in ("content", "thumbnail", "enclosure") and img is None:
+                u, ty = el.get("url") or "", (el.get("type") or el.get("medium") or "image").lower()
+                if u.startswith("https://") and ("image" in ty or tag == "thumbnail"):
+                    img = u
+        title = clean(fields.get("title"))
+        if not title:
+            continue
+        if img is None:
+            m = re.search(r"""<img[^>]+src=["'](https://[^"']+)""", html.unescape(fields.get("description", "") + fields.get("encoded", "")))
+            img = m.group(1) if m else None
+        desc = clean(fields.get("description") or fields.get("encoded"))
+        if desc.lower().startswith(title.lower()):
+            desc = desc[len(title):].strip(" -:.")
+        ts = None
+        stamp = (fields.get("pubDate") or fields.get("date") or "").strip()
+        try:
+            ts = parsedate_to_datetime(stamp)
+        except (TypeError, ValueError):
+            try:
+                ts = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            except ValueError:
+                ts = None
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        items.append({"title": safe(title), "link": safe((fields.get("link") or "").strip()), "desc": safe(desc),
+                      "ts": ts, "src": src, "img": img})
+    return items
+
+
+def jv_news_collect():
+    """Read every source in parallel. Returns (items, names reached, names tried)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(feed):
+        name, url = feed
+        try:
+            return name, jv_news_parse_feed(jv_news_get(url, "feed"), name)
+        except Exception:
+            return name, None
+    items, reached = [], set()
+    with ThreadPoolExecutor(max_workers=len(JV_NEWS_FEEDS)) as ex:
+        for name, got in ex.map(one, JV_NEWS_FEEDS):
+            if got is not None:
+                reached.add(name)
+                items.extend(got)
+    return items, reached, {n for n, _ in JV_NEWS_FEEDS}
+
+
+def jv_news_tokens(title):
+    return {w for w in re.findall(r"[a-z\u00e0-\u00ff0-9]{4,}", title.lower()) if w not in JV_NEWS_STOP}
+
+
+def jv_news_group(items, now):
+    """Keep recent items, merge the same story told by several desks: [{'best','srcs','ts'}], newest first."""
+    from datetime import timezone
+    fresh = [i for i in items if i["ts"] is not None and 0 <= (now - i["ts"]).total_seconds() <= JV_NEWS_MAX_AGE_H * 3600]
+    fresh.sort(key=lambda i: i["ts"], reverse=True)
+    groups = []
+    for i in fresh:
+        tk = jv_news_tokens(i["title"])
+        for g in groups:
+            common = len(tk & g["tk"])
+            if common >= 3 and common >= 0.5 * min(len(tk), len(g["tk"])):
+                g["items"].append(i)
+                g["tk"] |= tk
+                break
+        else:
+            groups.append({"items": [i], "tk": set(tk)})
+    out_ = []
+    for g in groups:
+        best = sorted(g["items"], key=lambda i: (bool(i["img"]), len(i["desc"]), i["ts"]), reverse=True)[0]
+        out_.append({"best": best, "srcs": sorted({i["src"] for i in g["items"]}), "ts": max(i["ts"] for i in g["items"])})
+    return out_
+
+
+def jv_news_age(ts, now):
+    m = int((now - ts).total_seconds() // 60)
+    return "just now" if m < 2 else f"{m} min ago" if m < 90 else f"{m // 60} h ago"
+
+
+def jv_ascii_art(raw, width=56, maxrows=16):
+    """A picture as coloured ASCII art, or None when Pillow is not installed or the picture cannot be read."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    import io
+    try:
+        Image.MAX_IMAGE_PIXELS = 40000000
+        im = Image.open(io.BytesIO(raw))
+        im.draft("RGB", (width * 4, width * 4))
+        im = im.convert("RGB")
+        w, h = im.size
+        rows = max(4, min(maxrows, int(width * h / max(w, 1) * 0.5)))
+        im = im.resize((width, rows))
+        ramp = " .:-=+*#%@"
+        lines = []
+        for y in range(rows):
+            parts = []
+            for x in range(width):
+                r, g, b = im.getpixel((x, y))
+                lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+                ch = ramp[min(9, int((lum ** 0.8) * 9.99))]
+                if ch == " ":
+                    parts.append(" ")
+                else:
+                    parts.append(fg(min(255, int(r * 1.25 + 20)), min(255, int(g * 1.25 + 20)), min(255, int(b * 1.25 + 20))) + ch)
+            lines.append("".join(parts) + TEXT)
+        return lines
+    except Exception:
+        return None
+
+
+def jv_news_topic_filter(topic):
+    """'war', 'guerra', 'protests'... -> a regex; any other topic -> its words."""
+    tl = topic.lower()
+    if re.search(r"\b(?:war|guerra|guerre|conflict\w*|conflitt\w*)\b", tl):
+        return JV_NEWS_WAR
+    if re.search(r"\b(?:protest\w*|manifest\w*|strike|sciopero|scioperi)\b", tl):
+        return JV_NEWS_PROTEST
+    words = [w for w in re.findall(r"[a-z\u00e0-\u00ff0-9]{3,}", tl) if w not in JV_NEWS_STOP]
+    return re.compile(r"\b(?:" + "|".join(re.escape(w) for w in words) + r")", re.I) if words else None
+
+
+def jv_news_show(items, topic, reached, tried, with_images=True, now=None):
+    """Sort the groups into WAR / PROTESTS / OTHER (or one block for a topic) and print each story in turn."""
+    from datetime import timezone
+    now = now or datetime.now(timezone.utc)
+    if not reached:
+        jarvis_say("I couldn't reach any news desk, sir: no internet, or the sites are blocking me. Try again in a moment.")
+        return
+    groups = jv_news_group(items, now)
+    hit = jv_news_topic_filter(topic) if topic else None
+    if topic and hit is None:
+        jarvis_say("Which topic, sir? Say 'jarvis news', 'jarvis news war' or 'jarvis news protests'.")
+        return
+    if hit is not None:
+        groups = [g for g in groups if hit.search(g["best"]["title"] + " " + g["best"]["desc"])]
+    key = lambda g: (-len(g["srcs"]), -g["ts"].timestamp())
+    if topic:
+        parts = [(topic.upper()[:24], sorted(groups, key=key)[:8])]
+    else:
+        prot = [g for g in groups if JV_NEWS_PROTEST.search(g["best"]["title"] + " " + g["best"]["desc"])]
+        rest = [g for g in groups if g not in prot]
+        war = [g for g in rest if JV_NEWS_WAR.search(g["best"]["title"] + " " + g["best"]["desc"])]
+        other = [g for g in rest if g not in war]
+        parts = [("WAR AND CONFLICTS", sorted(war, key=key)[:3]), ("PROTESTS", sorted(prot, key=key)[:3]),
+                 ("EVERYTHING ELSE", sorted(other, key=key)[:4])]
+    chosen = [g for _, gs in parts for g in gs]
+    if not chosen:
+        jarvis_say("Nothing new from the desks I follow" + (f" about '{safe(topic)}'" if topic else "") +
+                   f" in the last {JV_NEWS_MAX_AGE_H} hours, sir.")
+        return
+    pics = {}
+    if with_images:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def grab(g):
+            u = g["best"]["img"]
+            if not u:
+                return None
+            try:
+                return jv_ascii_art(jv_news_get(u, "image", 2000000), pics_width)
+            except Exception:
+                return None
+        try:
+            pics_width = max(30, min(60, shutil.get_terminal_size((100, 30)).columns - 8))
+        except (OSError, ValueError):
+            pics_width = 56
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            for g, art in zip(chosen, ex.map(grab, chosen)):
+                pics[id(g)] = art
+    try:
+        width = max(50, min(100, shutil.get_terminal_size((100, 30)).columns - 8))
+    except (OSError, ValueError):
+        width = 90
+    tick = "\u2714" if jv_can_utf8() else "OK"
+    jarvis_say(f"Here is the latest, sir: {len(chosen)} stories from {len(reached)} of {len(tried)} desks "
+               f"({', '.join(sorted(reached))}), all from the last {JV_NEWS_MAX_AGE_H} hours.")
+    pillow_note = False
+    for label, gs in parts:
+        if not gs:
+            continue
+        out()
+        out(f"  ===== {label} =====", GREEN)
+        for n, g in enumerate(gs, 1):
+            b = g["best"]
+            out()
+            for l in jv_rs_wrap(f"{n}/{len(gs)}  {b['title']}", width, 2):
+                out(l, YELLOW)
+            conf = f"{tick} confirmed by {len(g['srcs'])} desks: " if len(g["srcs"]) > 1 else "single desk: "
+            out(f"  {conf}{', '.join(g['srcs'])}  -  {jv_news_age(g['ts'], now)}", GRAY)
+            art = pics.get(id(g))
+            if art:
+                for l in art:
+                    out("  " + l, None)
+            elif b["img"] and with_images:
+                pillow_note = True
+            summary = " ".join(re.findall(r"[^.!?]+[.!?]+(?:\s|$)", b["desc"])[:3]) or b["desc"]
+            if len(summary) > 480:
+                summary = summary[:477].rstrip() + "..."
+            for l in jv_rs_wrap(summary or "(the feed carries no summary: open the link)", width, 4):
+                out(l, CYAN)
+            if b["link"]:
+                out("    " + b["link"], GRAY)
+    out()
+    if pillow_note:
+        out("  (some stories have a photo: install Pillow with 'pip install pillow' and I will draw it in ASCII)", GRAY)
+    out("  ('verified' here means: published by the desks above in the last 48 hours; a tick marks a story that two or "
+        "more desks carry. I cannot fact-check beyond that.)", GRAY)
+
+
+def jv_news_parse(t):
+    """'news', 'ultime notizie', 'jarvis news war', 'notizie sulla guerra', 'cosa succede nel mondo' -> topic ('' for
+    everything) or None (so 'open news.txt' stays a file question)."""
+    s = re.sub(r"\s+", " ", t.lower().replace("\u2019", "'")).strip(" ,;:!?.")
+    s = re.sub(r"^(?:(?:please|pls|per favore|ora|now|adesso|puoi|potresti|can you|could you|dammi|dimmi|mostrami|"
+               r"show me|give me|tell me|fammi vedere|leggimi|read me|fammi|voglio)\s+)+", "", s)
+    if re.search(r"\.(?:" + JV_RS_EXTS + r")\b", s) or re.search(r"[\"\u201c\u201d`]", s) or JV_RS_FILE_WORDS.search(s):
+        return None
+    lead = r"(?:(?:the|all the|tutte le|le|i|gli)\s+)?(?:(?:latest|last|new|newest|breaking|today's|ultime|ultimi|nuove|nuovi|ultim')\s+)*"
+    m = re.fullmatch(lead + r"(?:news|notizie|notiziario|headlines|titoli|telegiornale)(?:\s+(?:of today|today|di oggi|oggi|now|ora|"
+                     r"adesso|della giornata|del giorno))?(?:\s+(?:about|on|su|sul|sulla|sullo|sui|sugli|di|riguardo a|riguardo|"
+                     r"regarding|from|dalla|dal|della|del|delle)\s+(.+))?", s)
+    if m:
+        return (m.group(1) or "").strip()
+    if re.fullmatch(r"(?:what's|what is|whats)\s+(?:the\s+)?(?:news|happening(?: in the world)?|going on(?: in the world)?)"
+                    r"(?:\s+(?:today|now))?|any (?:news|updates)|cosa succede(?: nel mondo)?|che succede(?: nel mondo)?|"
+                    r"cosa sta succedendo(?: nel mondo)?|novit[a\u00e0]|aggiornamenti", s):
+        return ""
+    m = re.fullmatch(r"(?:latest |ultime )?(?:news|notizie)\s+(.+)", s)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def jv_news_cmd(orig, t):
+    """'jarvis news' (everything) / 'jarvis news war' / 'jarvis notizie sulle proteste', while online."""
+    if not CONTESTO.get("jv_named"):
+        return False
+    topic = jv_news_parse(t)
+    if topic is None:
+        return False
+    if not CONTESTO.get("jv_online"):
+        jarvis_say("I'm not online yet, sir. Say 'jarvis be online' first, then ask for the news again.")
+        CONTESTO["jv_nostore"] = True
+        return True
+    if CONTESTO.get("jv_nolog"):                      # the maintenance test never goes to the internet
+        jarvis_say("Test mode, sir: I don't touch the network here.")
+        return True
+    try:
+        jarvis_say("Reading the news desks, sir: " + ", ".join(dict.fromkeys(n for n, _ in JV_NEWS_FEEDS)) + "...")
+        items, reached, tried = jv_news_collect()
+        jv_news_show(items, topic, reached, tried)
+    except KeyboardInterrupt:
+        out()
+        jarvis_say("Stopped, sir.")
+    return True
+
+
 def jv_interpret_core(texto):
     """Map a plain-language request (English or Italian) to a read-only command.
     Returns True if it understood and handled the request."""
@@ -5158,6 +5505,8 @@ def jv_interpret_core(texto):
         return True
 
     if jv_online_cmd(orig, t):          # 'jarvis be online' (animation), 'jarvis go offline'
+        return True
+    if jv_news_cmd(orig, t):            # 'jarvis news' / 'jarvis news war': latest stories in parts, with ASCII photos
         return True
     if jv_research_cmd(orig, t, sel):   # 'jarvis cerca <topic>' / 'jarvis research <topic>' while online
         return True
@@ -5302,6 +5651,7 @@ def jarvis_interpret(texto):
   jarvis which columns / which tables / how many pages / is it 64-bit / what is inside
   jarvis biggest files / find all png files / duplicates / modified today / free disk space
   jarvis be online              sci-fi start-up: globe + 5 nodes, then:  jarvis cerca <topic>  (summary)   jarvis go offline
+  jarvis news / news war        (online) latest stories from ANSA, RaiNews...: parts, ASCII photo, summary
   jarvis examples               shows everything I can answer
 (You can also skip the word 'jarvis': just type the request.)""")
 def jarvis_cmd(args):
@@ -5381,6 +5731,7 @@ JV_UPD_ALLOW = (
     ("pc_roots", "ctypes"), ("system_memory", "ctypes"), ("battery_info", "ctypes"), ("jv_uptime", "ctypes"),
     ("battery_info", "subprocess.run"), ("jv_global", "socket"), ("sqlite_open_ro", "sqlite3.connect"),
     ("carica_estensioni", "runpy.run_path"), ("main", "os.system"),
+    ("jv_news_get", "urllib"), ("jv_news_get", "ssl"),      # the news reader's one read-only https door (online mode only)
     ("jv_web_get", "urllib"), ("jv_web_get", "ssl"),      # the one read-only https lookup (Wikipedia), online mode only
     ("steam_libraries", "winreg"),           # read-only: reads the Steam folder from the registry
 )
@@ -6683,6 +7034,47 @@ def jv_upd_selftest():
             print("ok")
         run("quoted words and file names are not researched", search_stays_a_file_question)
         run("jarvis go offline", say("jarvis go offline"), need=["offline"])
+        def news_wording():
+            for yes, topic in (("news", ""), ("jarvis news".replace("jarvis ", ""), ""), ("ultime notizie", ""), ("le ultime news", ""),
+                               ("news war", "war"), ("notizie sulla guerra", "guerra"), ("what's the news", ""),
+                               ("show me the latest news about protests", "protests"), ("cosa succede nel mondo", "")):
+                if jv_news_parse(yes) != topic:
+                    raise RuntimeError(f"'{yes}' is not read as news about '{topic}'")
+            for no in ("open news.txt", "search for news in it", "how many lines", 'search for "news"', "what is a dll"):
+                if jv_news_parse(no) is not None:
+                    raise RuntimeError(f"'{no}' was taken for a news request")
+            print("ok")
+        run("the phrases that ask for the news", news_wording)
+        def news_pipeline():
+            from datetime import timezone, timedelta
+            now = datetime.now(timezone.utc)
+            mk = lambda title, src, h, desc="Summary of the story. More detail follows here.": {
+                "title": title, "link": "https://example.org/x", "desc": desc, "ts": now - timedelta(hours=h), "src": src, "img": None}
+            items = [mk("Missile attack on city leaves dozens wounded", "BBC World", 2),
+                     mk("Missile attack on city leaves dozens wounded overnight", "ANSA", 3),
+                     mk("Thousands protest in the capital against the new law", "RaiNews", 5),
+                     mk("Scientists find new exoplanet candidate", "Geopop", 7),
+                     mk("Old story from last week", "ANSA", 300)]
+            jv_news_show(items, "", {"BBC World", "ANSA", "RaiNews", "Geopop"}, {"BBC World", "ANSA", "RaiNews", "Geopop", "Il Post"},
+                         with_images=False, now=now)
+            jv_news_show(items, "war", {"ANSA"}, {"ANSA"}, with_images=False, now=now)
+            jv_news_show([], "", set(), {"ANSA"}, with_images=False, now=now)
+        run("news sorted into war / protests / everything else", news_pipeline, need=["WAR AND CONFLICTS", "PROTESTS", "EVERYTHING ELSE", "confirmed by 2 desks", "couldn't reach"], bad=["last week"])
+        def news_refusals():
+            for url, kind in (("http://www.ansa.it/sito/ansait_rss.xml", "feed"), ("https://example.com/feed", "feed"),
+                              ("https://127.0.0.1/a.jpg", "image"), ("https://localhost/a.jpg", "image")):
+                try:
+                    jv_news_get(url, kind)
+                except ValueError:
+                    continue
+                raise RuntimeError(f"{url} was not refused")
+            try:
+                jv_news_parse_feed(b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "b">]><rss><channel/></rss>', "T")
+            except ValueError:
+                print("ok")
+                return
+            raise RuntimeError("a feed with XML entities was accepted")
+        run("only my news sources, https, no numeric hosts, no XML entities", news_refusals)
 
         section("Game launcher (nothing is started)")
         def match():
