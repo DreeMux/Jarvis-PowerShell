@@ -5835,6 +5835,8 @@ def jarvis_interpret(texto):
   jarvis open chrome            (online only) Chrome mode: then  open email / open canva / open youtube lofi / search <words>
                                 open pages in Chrome;  open chrome account <name or number>  picks the account;  close chrome mode  ends it
   jarvis open chrome then gmail on account <name>   several steps in ONE sentence (online only; also: and, poi, e poi, dopo)
+  (Windows) Jarvis starts full screen with the globe in the middle, which then rises to the top; when Chrome opens, my window
+  shrinks to one half of the screen and Chrome takes the other half
   chrome full screen / chrome side by side   where Chrome opens: maximised, or NEXT to my window (default), never on top of it
   jarvis open deltarune         STARTS the installed game (jarvis open deltarune chapter 2 picks a chapter)
   open deltarune                without 'jarvis': only shows the data.win read-only, never starts the game
@@ -7466,6 +7468,16 @@ def jv_upd_selftest():
                 CONTESTO.update(jv_launch_dry=False, jv_browser=None, jv_online=False, jv_named=False, jv_chrome_layout=None)
                 CONTESTO.pop("jv_chrome_win", None)
         run("Chrome layout words: full screen / beside Jarvis (nothing is opened)", layout_test)
+        def intro_test():
+            for R in (4, 5, 11):
+                ls = jv_logo_lines(R, 120, 0.7, 2)
+                if len(ls) != 2 * R + 1 + 2:
+                    raise RuntimeError(f"logo of radius {R} has {len(ls)} lines")
+            if jv_launch_maximize_self() not in (True, False):
+                raise RuntimeError("maximise returned something odd")
+            jv_logo_show()                                    # not a terminal here: it must do nothing at all
+            print("ok")
+        run("start-up logo: sizes are right, nothing happens without a real terminal", intro_test, need=["ok"])
 
         section("Update system (checks only, nothing is installed)")
         run("Get-SecurityStatus panel", cmd("Get-SecurityStatus"), need=["SECURITY STATUS", "FINGERPRINT", "CODE SCAN", "GUARD", "ISOLATION"])
@@ -8318,6 +8330,23 @@ def jv_launch_relayout():
     return n
 
 
+def jv_launch_maximize_self():
+    """Windows: make the Jarvis window full screen (also inside Windows Terminal). True when it was done."""
+    api = jv_launch_win_api()
+    if api is None:
+        return False
+    try:
+        got = jv_launch_screen_rects(api)
+        if not got:
+            return False
+        root = got[2]
+        if not api["u"].IsZoomed(root):
+            api["u"].ShowWindow(root, 3)                       # SW_MAXIMIZE
+        return True
+    except Exception:
+        return False
+
+
 def jv_launch_chrome_open(urls, profile_dir=None):
     """Start Chrome (read-only for me: I only hand it addresses). The command is a list, never a shell string.
     The first window of each account in this session is placed (full screen, or beside the Jarvis window);
@@ -9122,41 +9151,68 @@ def jv_logo_lines(R, cols, angle, scan=-1):
 
 
 def jv_logo_show():
+    """Start-up: the window goes full screen, the globe spins in the middle of it, then shrinks and rises to the top
+    while the window settles. Needs a real terminal (a pipe, e.g. the update start test, sees nothing of this)."""
     if not sys.stdout.isatty():
         return
+    try:
+        before = shutil.get_terminal_size((100, 30))
+    except (OSError, ValueError):
+        before = os.terminal_size((100, 30))
+    if jv_launch_maximize_self():
+        end = time.time() + 1.2                                 # wait until the console really has the new size
+        while time.time() < end and shutil.get_terminal_size((100, 30)) == before:
+            time.sleep(0.05)
     try:
         cols, rows = shutil.get_terminal_size((100, 30))
     except (OSError, ValueError):
         cols, rows = 100, 30
-    R = 5 if rows >= 28 else 4 if rows >= 22 else 0
-    if R == 0 or cols < 4 * R + 6:                      # a very small window: just the name
+    Rs = 5 if rows >= 28 else 4 if rows >= 22 else 0
+    if Rs == 0 or cols < 4 * Rs + 6:                            # a very small window: just the name
         out("J.A.R.V.I.S.", CYAN)
         out()
         return
+    Rb = max(Rs, min((rows - 6) // 2, (cols - 6) // 4, 11))
+    total = 2 * Rb + 1 + 2                                      # globe rows + blank + title
+    pad0 = max(0, (rows - 1 - total) // 2)
+    screen = pad0 + total
     state = {"first": True}
 
-    def draw(angle, scan=-1):
-        lines = jv_logo_lines(R, cols, angle, scan)
+    def draw(R, pad, angle, scan=-1):
+        lines = [""] * pad + jv_logo_lines(R, cols, angle, scan)
+        lines += [""] * (screen - len(lines))
         if not state["first"]:
-            sys.stdout.write("\x1b[%dA" % len(lines))
+            sys.stdout.write("\x1b[%dA" % screen)
         state["first"] = False
-        sys.stdout.write("".join(l + "\x1b[K\n" for l in lines))
+        sys.stdout.write("".join(l + "\x1b[K\n" for l in lines[:screen]))
         sys.stdout.flush()
 
-    sys.stdout.write("\x1b[?25l")
+    sys.stdout.write("\x1b[?25l\x1b[2J\x1b[H")
+    angle = 0.0
     try:
-        angle, frames = 0.0, 24
         try:
-            for i in range(frames):                     # the globe starts fast and slows down
-                draw(angle, scan=i % (2 * R + 1))
-                angle += 0.05 + 0.22 * (1 - i / frames)
+            spin = 34
+            for i in range(spin):                               # 1) full screen, the globe spins in the middle
+                draw(Rb, pad0, angle, scan=i % (2 * Rb + 1))
+                angle += 0.07 + 0.2 * (1 - i / spin)
                 time.sleep(0.05)
+            steps = 22
+            for i in range(1, steps + 1):                       # 2) it shrinks and rises to the top
+                t = i / steps
+                t = t * t * (3 - 2 * t)
+                draw(round(Rb + (Rs - Rb) * t), round(pad0 * (1 - t)), angle)
+                angle += 0.06
+                time.sleep(0.04)
         except KeyboardInterrupt:
             pass
-        draw(angle)                                     # the last picture stays: globe at rest, name below
     finally:
         sys.stdout.write("\x1b[?25h" + TEXT)
         sys.stdout.flush()
+    sys.stdout.write("\x1b[2J\x1b[H")                           # 3) the same picture, now as the top of the window
+    for l in jv_logo_lines(Rs, cols, angle):
+        sys.stdout.write(l + "\x1b[K\n")
+    sys.stdout.write(TEXT)
+    sys.stdout.flush()
     out()
 
 
