@@ -58,16 +58,18 @@ JV_DATA = {'version': 2, 'game_dirs': ['c:\\program files (x86)\\steam\\steamapp
 def fg(r, g, b): return f"\x1b[38;2;{r};{g};{b}m"
 def bg(r, g, b): return f"\x1b[48;2;{r};{g};{b}m"
 
-BG      = bg(0, 0, 0)            # nero
-TEXT    = fg(238, 237, 240)      # #EEEDF0 grigio chiaro
-YELLOW  = fg(255, 255, 0)        # comandi digitati (PSReadLine)
-RED     = fg(255, 0, 0)          # errori
-GREEN   = fg(0, 255, 0)
-CYAN    = fg(0, 255, 255)
-GRAY    = fg(128, 128, 128)
-JV_SEC_G = fg(0, 255, 70)       # security panels: terminal green
-JV_SEC_D = fg(0, 150, 50)       # dim green
-JV_SEC_A = fg(255, 176, 0)      # amber warnings
+# palette of the Windows 11 terminal (Campbell scheme), as PowerShell 7 shows it there
+BG      = bg(12, 12, 12)         # #0C0C0C sfondo
+TEXT    = fg(204, 204, 204)      # #CCCCCC testo normale
+YELLOW  = fg(249, 241, 165)      # #F9F1A5 comando digitato (PSReadLine)
+BLUE    = fg(59, 120, 255)       # #3B78FF testo tra virgolette
+RED     = fg(231, 72, 86)        # #E74856 errori
+GREEN   = fg(22, 198, 12)        # #16C60C
+CYAN    = fg(97, 214, 214)       # #61D6D6
+GRAY    = fg(118, 118, 118)      # #767676
+JV_SEC_G = fg(22, 198, 12)      # security panels: green
+JV_SEC_D = fg(19, 161, 14)      # dim green
+JV_SEC_A = fg(193, 156, 0)      # amber warnings
 HEADER_COLOR = TEXT              # intestazioni tabelle: classico = testo normale
 
 try:
@@ -5210,6 +5212,136 @@ def carica_estensioni():
                 out(f"Errore caricando ext/{f}: {e}", RED)
 
 
+def jv_hl(buf):
+    """Colors of the line while you type: the command yellow, quoted text blue, the rest normal."""
+    m = re.match(r"(\s*)(\S+)", buf)
+    res, i, q = "", 0, None
+    if m:
+        res, i = m.group(1) + YELLOW + m.group(2) + TEXT, m.end()
+    while i < len(buf):
+        c = buf[i]
+        if q:
+            res += c
+            if c == q:
+                res, q = res + TEXT, None
+        elif c in "\"'":
+            res, q = res + BLUE + c, c
+        else:
+            res += c
+        i += 1
+    return res + TEXT
+
+
+JV_HIST = []
+
+
+def jv_getkey():
+    """One key: a character, or 'left' 'right' 'up' 'down' 'home' 'end' 'del' 'enter' 'bs' 'eof'."""
+    if os.name == "nt":
+        import msvcrt
+        c = msvcrt.getwch()
+        if c in ("\x00", "\xe0"):
+            return {"K": "left", "M": "right", "H": "up", "P": "down", "G": "home", "O": "end", "S": "del"}.get(msvcrt.getwch(), "")
+        if c == "\x03":
+            raise KeyboardInterrupt
+        return {"\r": "enter", "\n": "enter", "\x08": "bs", "\x1a": "eof", "\x01": "home", "\x05": "end"}.get(c, c)
+    import select
+    fd = sys.stdin.fileno()
+    dec = codecs.getincrementaldecoder("utf-8")("replace")
+    while True:
+        b = os.read(fd, 1)
+        if not b:
+            return "eof"
+        if b == b"\x1b":
+            if not select.select([fd], [], [], 0.04)[0]:
+                return ""
+            if os.read(fd, 1) not in (b"[", b"O"):
+                return ""
+            seq = b""
+            while True:
+                x = os.read(fd, 1)
+                seq += x
+                if not x or 0x40 <= x[0] <= 0x7e:
+                    break
+            return {b"A": "up", b"B": "down", b"C": "right", b"D": "left", b"H": "home", b"F": "end",
+                    b"3~": "del", b"1~": "home", b"7~": "home", b"4~": "end", b"8~": "end"}.get(seq, "")
+        if b in (b"\r", b"\n"):
+            return "enter"
+        if b in (b"\x7f", b"\x08"):
+            return "bs"
+        if b == b"\x04":
+            return "eof"
+        if b == b"\x01":
+            return "home"
+        if b == b"\x05":
+            return "end"
+        c = dec.decode(b)
+        if c:
+            return c
+
+
+def leggi_riga():
+    """The prompt with live colors (needs a real terminal; otherwise plain input())."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return input(prompt())
+    base = f"PS {os.getcwd()}> "
+    buf, pos, hist, draft = "", 0, len(JV_HIST), ""
+    old = None
+    if os.name != "nt":
+        import termios
+        import tty
+        old = termios.tcgetattr(sys.stdin.fileno())
+        tty.setcbreak(sys.stdin.fileno())
+
+    def draw():
+        col = len(base) + pos
+        sys.stdout.write("\r" + TEXT + base + jv_hl(buf) + "\x1b[K\r" + (f"\x1b[{col}C" if col else ""))
+        sys.stdout.flush()
+    try:
+        draw()
+        while True:
+            k = jv_getkey()
+            if k == "enter":
+                break
+            if k == "eof":
+                if not buf:
+                    sys.stdout.write("\n")
+                    raise EOFError
+            elif k == "bs":
+                if pos:
+                    buf, pos = buf[:pos - 1] + buf[pos:], pos - 1
+            elif k == "del":
+                buf = buf[:pos] + buf[pos + 1:]
+            elif k == "left":
+                pos = max(0, pos - 1)
+            elif k == "right":
+                pos = min(len(buf), pos + 1)
+            elif k == "home":
+                pos = 0
+            elif k == "end":
+                pos = len(buf)
+            elif k in ("up", "down"):
+                if hist == len(JV_HIST):
+                    draft = buf
+                hist = max(0, hist - 1) if k == "up" else min(len(JV_HIST), hist + 1)
+                buf = JV_HIST[hist] if hist < len(JV_HIST) else draft
+                pos = len(buf)
+            elif len(k) == 1 and k >= " ":
+                buf, pos = buf[:pos] + k + buf[pos:], pos + 1
+            draw()
+    except KeyboardInterrupt:
+        sys.stdout.write(TEXT + "\n")
+        raise
+    finally:
+        if old is not None:
+            import termios
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
+    sys.stdout.write(TEXT + "\n")
+    if buf.strip() and (not JV_HIST or JV_HIST[-1] != buf):
+        JV_HIST.append(buf)
+    return buf
+
+
 def prompt():
     base = f"PS {os.getcwd()}> "
     giallo = f"\x01{YELLOW}\x02" if HAS_READLINE else YELLOW
@@ -5233,7 +5365,7 @@ def main():
     try:
         while True:
             try:
-                riga = input(prompt())
+                riga = leggi_riga()
             except EOFError:
                 break
             except KeyboardInterrupt:
