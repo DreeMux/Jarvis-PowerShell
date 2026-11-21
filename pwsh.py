@@ -5869,6 +5869,7 @@ class JvSink:
         return False
 
 
+JV_HACK_ONCE = ("get-securitystatus",)         # ignores its arguments and runs a fixed, heavy check: one attack proves it
 JV_HACK_WHOLE_PC = ("denux.hunter",)          # with no target these scan the whole computer: not a bug, not attacked bare
 JV_HACK_SKIP = ("exit", "implement", "jarvis", "launch", "maintenance", "voice", "extract.key", "clear-host")
 # (family, payload): classic input attacks, thrown as plain text at read-only commands. Nothing here is executed as code.
@@ -6045,6 +6046,10 @@ def jv_hack_dynamic(split):
                 for extra in ((), ("-force",))
                 if (pay and not pay.startswith("-")) or n.lower() not in JV_HACK_WHOLE_PC]       # no target = it would scan the whole PC
             for n, _ in targets}
+    for n in plan:
+        if n.lower() in JV_HACK_ONCE:
+            plan[n] = plan[n][:1]
+    lim = [3.0]                                    # seconds before an attack counts as a hang (adapts to the PC's speed)
     total = sum(len(v) for v in plan.values()) + len(JV_HACK_PREFIXES) * len(JV_HACK_PAYLOADS)
     stats = {"done": 0, "held": 0}
     crashes, hangs, t0 = {}, [], time.time()
@@ -6052,7 +6057,7 @@ def jv_hack_dynamic(split):
     def launch(label, code, fn):
         sys.stdout = JvSink()
         try:
-            res, took, info = jv_hack_attempt(fn)
+            res, took, info = jv_hack_attempt(fn, lim[0])
         finally:
             sys.stdout = saved_out
             try:
@@ -6068,9 +6073,9 @@ def jv_hack_dynamic(split):
             split.code(f"CRASH {code}", RED)
             split.say(f"CRASH in {info[0][0]}() line {info[0][1]}: {info[1]}", RED)
         else:
-            hangs.append(label)
+            hangs.append(f"{label} (no answer in {lim[0]:.0f}s)")
             split.code(f"HANG  {code}", JV_SEC_A)
-            split.say(f"HANG (>3s): {label}", JV_SEC_A)
+            split.say(f"HANG (>{lim[0]:.0f}s): {label}", JV_SEC_A)
         split.status = (f"attacks {stats['done']}/{total}   held {stats['held']}   crashes {len(crashes)}   "
                         f"hangs {len(hangs)}   {time.time() - t0:4.1f}s")
         split.draw()
@@ -6079,6 +6084,17 @@ def jv_hack_dynamic(split):
     try:
         for nome, fn in targets:
             split.say(f"Attacking {nome} ...", TEXT)
+            if nome.lower() not in JV_HACK_WHOLE_PC:           # how fast is it normally? the limit follows
+                sys.stdout = JvSink()
+                try:
+                    base_res, base_took, _ = jv_hack_attempt(lambda fn=fn: fn([]), 30.0)
+                finally:
+                    sys.stdout = saved_out
+                    try:
+                        os.chdir(saved_cwd)
+                    except OSError:
+                        pass
+                lim[0] = min(20.0, max(3.0, base_took * 4 + 1.5)) if base_res != "hang" else 20.0
             for fam, pay, args in plan[nome]:
                 CONTESTO["riga"] = f"{nome} {pay}"
                 if not launch(f"{nome} [{fam}]", f"{fn.__name__}({jv_hack_clean(repr(args))})",
@@ -6232,7 +6248,7 @@ def jv_hack_yourself(heal=True):
     for (func, line), (label, kind, msg) in crashes.items():
         out(f"    crash    : {func}() line {line}: {kind}: {safe(msg)}   <- {safe(label)}", RED)
     for label in hangs:
-        out(f"    hang     : {safe(label)}  (did not answer within 3 s)", JV_SEC_A)
+        out(f"    hang     : {safe(label)}", JV_SEC_A)
     new_src, applied, manual = jv_hack_heal(src, found, crashes)
     for a in applied:
         out(f"    will fix : {safe(a)}", JV_SEC_G)
