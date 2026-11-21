@@ -2216,6 +2216,7 @@ def jv_examples(t):
         ("MATHS / UNITS", 'calculate 15% of 80   |   2+2*3   |   square root of 144   |   convert 5 km to miles   |   100 f to c   |   2 gb in mb'),
         ("DATES", 'how many days until christmas   |   what day is 25/12/2026   |   days between 1/1/2026 and 1/3/2026'),
         ("CHAT", 'jarvis perfect   |   yo big jarvis   |   tell me a joke   |   how are you   |   again (repeats my last request)'),
+        ("ONLINE / RESEARCH", 'jarvis be online   |   jarvis cerca <topic>   |   jarvis research sha256   |   jarvis go offline'),
         ("SECURITY / UPDATE", 'security   |   implement jarvis   |   implement jarvis -Dry   |   implement jarvis <file.py>   |   go in maintenance'),
     ]
     w = max(len(a) for a, _ in rows)
@@ -3404,7 +3405,8 @@ JV_SUGGEST = ["find my games", "scan this PC for corrupt files", "open <file>", 
               "biggest files", "find all png files", "duplicates", "modified today", "free disk space", "status",
               "what time is it", "go in maintenance", "implement jarvis", "examples", "what is a dll",
               "calculate 15% of 80", "convert 5 km to miles", "how many days until christmas", "tell me a joke",
-              "what does dir do", "tell me about undertale", "security status", "again", "what didn't you understand"]
+              "what does dir do", "tell me about undertale", "security status", "again", "what didn't you understand",
+              "be online", "cerca <topic>", "go offline"]
 
 
 def jv_pick(*opts):
@@ -4276,6 +4278,18 @@ def jv_compare(t):
     return None
 
 
+def jv_try_deep(orig, t):
+    """Spoken to by name ('jarvis duplicates', 'jarvis tell me about a.txt'): a request about a file, a folder or this
+    PC goes to the specific handlers first, before the glossary and the how-to answers. True when one handled it."""
+    if CONTESTO.get("jv_deep_try"):
+        return False
+    CONTESTO["jv_deep_try"] = True
+    try:
+        return bool(jv_deep(orig, t, CONTESTO.get("file")))
+    finally:
+        CONTESTO["jv_deep_try"] = False
+
+
 def jv_brain(orig, t):
     """The local 'AI-like' layer: comparisons, how-to / why / troubleshooting retrieval. Only for PC, file and game topics."""
     s = t.strip().rstrip("?!. ").replace("’", "'")
@@ -4291,6 +4305,8 @@ def jv_brain(orig, t):
     named = CONTESTO.get("jv_named")
     if not (q or (named and len(s.split()) >= 2)):
         return False
+    if named and not q and jv_try_deep(orig, t):       # 'jarvis free disk space', 'jarvis find all png files'
+        return True
     one = not CONTESTO.get("file") and not re.search(r"\b(?:it|its|this|that|them|these|those)\b", s)   # 'how big is it' is about a file
     hit = jv_faq_find(s + (" jarvis" if CONTESTO.get("jv_said_name") else ""), one)
     if not hit:
@@ -4411,7 +4427,8 @@ def jv_know(orig, t):
     if re.search(r"\b(?:weather|meteo|news|notizie|google|youtube|stock price|bitcoin|search the web|cerca su internet)\b", s) \
             and not re.search(r"\.\w{2,4}\b", s):
         say("I run offline, sir: no internet, so no weather, news or web searches. Files, games, your PC, maths, "
-            "units, dates and a glossary of tech terms are my territory.")
+            "units, dates and a glossary of tech terms are my territory. Say 'jarvis be online' and then "
+            "'jarvis cerca <topic>' for a summary from my own knowledge and your files.")
         return True
 
     # --- definitions: "what is a dll", "explain sha256", "tell me about undertale", "what does dir do"
@@ -4454,6 +4471,8 @@ def jv_know(orig, t):
             return True
         if CONTESTO.get("jv_named") and re.match(r"^(?:what is|what are|who is|what does|explain|define|tell me about|"
                                                  r"cos|che cos|spiega|parlami)", s) and len(key) >= 3:
+            if jv_try_deep(orig, t):                       # not a word: a file here ('tell me about a.txt'), what is inside...
+                return True
             say(f"I don't have '{safe(key)}' in my glossary yet, sir. I know file types, PC and Windows terms, security, "
                 f"games and programming words. Ask me about a file, or say 'jarvis examples'.")
             return True
@@ -4464,6 +4483,8 @@ def jv_know(orig, t):
             say(JV_GAMES_KB[key] + f" Say 'jarvis open {key}' to start it.")
             return True
         hits = sorted((e for e in JV_KB if key in e[0]), key=lambda e: e[0][0] != key)
+        if hits and len(key) >= 2 and not (jv_needs_file(t) and not CONTESTO.get("file")) and jv_try_deep(orig, t):
+            return True                                              # 'jarvis duplicates' lists them, it does not define them
         if hits and len(key) >= 2:
             say(f"{hits[0][0][0].upper() if len(hits[0][0][0]) <= 5 else hits[0][0][0].capitalize()}: {hits[0][1]}")
             return True
@@ -4586,6 +4607,482 @@ def jv_unwrap(orig):
     return orig
 
 
+# ---------------- ONLINE mode: the sci-fi boot animation and the research command ----------------
+# 'jarvis be online' plays a spinning globe over five big square nodes that light up forward and back,
+# then Jarvis says he is online. While online, 'jarvis cerca <topic>' / 'jarvis research <topic>' brings back
+# a summary. Everything stays OFFLINE and READ-ONLY: the research uses my own glossary, FAQ, games and
+# commands, plus a look at the small text files and file names of the current folder.
+JV_NODE_NAMES = ("FILES", "GAMES", "PC", "BRAIN", "SECURE")
+
+
+def jv_can_utf8():
+    """True when the console can draw box and block characters; otherwise the animation uses plain ASCII."""
+    try:
+        "\u2588\u2592\u250c\u2500\u2510\u2502\u2514\u2518\u252c\u2534\u253c".encode(getattr(sys.stdout, "encoding", None) or "utf-8")
+        return True
+    except (UnicodeError, LookupError):
+        return False
+
+
+def jv_shade(level, hue="cyan"):
+    """Brightness 0..1 -> colour escape. Cyan while booting, green once online; the brightest cells run white-hot."""
+    level = max(0.0, min(1.0, level))
+    r, g, b = (97, 214, 214) if hue == "cyan" else (22, 220, 60)
+    k = 0.16 + 0.84 * level
+    w = 0.6 * level ** 4
+    return fg(int(r * k + (255 - r) * w), int(g * k + (255 - g) * w), int(b * k + (255 - b) * w))
+
+
+def jv_paint(cells, hue):
+    """[(char, brightness)] -> one coloured line."""
+    parts, last = [], None
+    for c, lv in cells:
+        if c == " ":
+            parts.append(" ")
+            continue
+        col = jv_shade(lv, hue)
+        parts.append(c if col == last else col + c)
+        last = col
+    return "".join(parts) + TEXT
+
+
+def jv_globe_rows(R, angle, scan=-1):
+    """The rotating globe as rows of (char, brightness): continents from a smooth pattern, a lat/long grid, a rim."""
+    rows = []
+    for ry in range(2 * R + 1):
+        y = (R - ry) / R
+        lat = math.asin(max(-1.0, min(1.0, y)))
+        cells = []
+        for c in range(4 * R + 1):
+            x = (c - 2 * R) / (2.0 * R)             # characters are about twice as tall as wide
+            d = x * x + y * y
+            if d > 1.0:
+                cells.append((" ", 0.0))
+                continue
+            z = math.sqrt(1.0 - d)
+            lon = math.atan2(x, z) + angle
+            f = (math.sin(2.1 * lon + 0.8) * math.cos(1.7 * lat) + 0.6 * math.sin(3.3 * lat - 1.1 * lon)
+                 + 0.4 * math.sin(5.2 * lon + lat))
+            if f > 0.3:
+                ch, lv = "+*#@"[min(3, int(z * 4))], 0.35 + 0.65 * z
+            else:
+                la, lo = math.degrees(lat), math.degrees(lon) % 360
+                if abs((la + 15) % 30 - 15) < 4.0 or abs((lo + 15) % 30 - 15) < 3.2 / max(math.cos(lat), 0.35):
+                    ch, lv = ".", 0.25 + 0.45 * z
+                elif z < 0.3:
+                    ch, lv = ":", 0.5                      # the rim of the globe
+                else:
+                    ch, lv = " ", 0.0
+            if ry == scan and ch != " ":
+                lv = min(1.0, lv + 0.4)
+            cells.append((ch, lv))
+        rows.append(cells)
+    return rows
+
+
+def jv_online_cfg(big, utf):
+    """Sizes and characters of the animation: a big layout for roomy terminals, a compact one otherwise."""
+    R, NW, NH, GAP = (6, 9, 4, 5) if big else (4, 5, 2, 3)
+    cs = [i * (NW + GAP) + NW // 2 for i in range(5)]
+    if utf:
+        ch = {"v": "\u2502", "h": "\u2500", "tl": "\u250c", "tr": "\u2510", "bl": "\u2514", "br": "\u2518",
+              "td": "\u252c", "x": "\u253c", "full": "\u2588", "mid": "\u2592"}
+    else:
+        ch = {"v": "|", "h": "-", "tl": "+", "tr": "+", "bl": "+", "br": "+", "td": "+", "x": "+", "full": "#", "mid": "%"}
+    return {"R": R, "NW": NW, "NH": NH, "GAP": GAP, "CW": 5 * NW + 4 * GAP, "cs": cs, "ch": ch}
+
+
+def jv_online_frame(cfg, angle, p, phase, linked, hue, tick, scan=-1, flash=1.0):
+    """One picture: title, globe, link to the bus, the bus with its pulse at column p, five nodes, their names, status."""
+    R, NW, NH, GAP, CW, cs, ch = (cfg[k] for k in ("R", "NW", "NH", "GAP", "CW", "cs", "ch"))
+    blank = (" ", 0.0)
+    lines = []
+    title = "J . A . R . V . I . S"
+    lines.append(jv_paint([(c, 0.95 * flash) for c in " " * ((CW - len(title)) // 2) + title], hue))
+    left = [blank] * ((CW - (4 * R + 1)) // 2)
+    for row in jv_globe_rows(R, angle, scan):
+        lines.append(jv_paint(left + row, hue))
+    if phase == "lock":
+        lv = [flash] * 5
+    elif p is None:
+        lv = [0.0] * 5
+    else:
+        lv = [max(0.0, 1.0 - abs(c - p) / (NW + GAP * 0.5)) for c in cs]
+    hub = 0.2 if phase == "boot" else flash if phase == "lock" else 0.45 + 0.45 * abs(math.sin(tick * 0.35))
+    row = [blank] * CW
+    row[cs[2]] = (ch["v"], hub)
+    lines.append(jv_paint(row, hue))
+    bus = [blank] * CW
+    for x in range(cs[0], cs[4] + 1):
+        near = 0.18 if p is None else 0.18 + 0.82 * max(0.0, 1.0 - abs(x - p) / (NW * 1.1))
+        bus[x] = (ch["h"], flash if phase == "lock" else near)
+    for i, key in ((0, "tl"), (1, "td"), (2, "x"), (3, "td"), (4, "tr")):
+        bus[cs[i]] = (ch[key], bus[cs[i]][1])
+    lines.append(jv_paint(bus, hue))
+    row = [blank] * CW
+    for i in range(5):
+        row[cs[i]] = (ch["v"], max(lv[i], 0.18))
+    lines.append(jv_paint(row, hue))
+    for r in range(NH):
+        cells = []
+        for i in range(5):
+            if i:
+                cells += [blank] * GAP
+            if lv[i] >= 0.7:
+                cells += [(ch["full"], 0.55 + 0.45 * lv[i])] * NW
+            elif lv[i] >= 0.3:
+                cells += [(ch["mid"], 0.35 + 0.5 * lv[i])] * NW
+            else:
+                if r == 0:
+                    s = ch["tl"] + ch["h"] * (NW - 2) + ch["tr"]
+                elif r == NH - 1:
+                    s = ch["bl"] + ch["h"] * (NW - 2) + ch["br"]
+                else:
+                    s = ch["v"] + " " * (NW - 2) + ch["v"]
+                cells += [(c, 0.14) for c in s]
+        lines.append(jv_paint(cells, hue))
+    cells = []
+    for i in range(5):
+        if i:
+            cells += [blank] * GAP
+        cells += [(c, max(lv[i], 0.3)) for c in JV_NODE_NAMES[i].center(NW)[:NW]]
+    lines.append(jv_paint(cells, hue))
+    if phase == "boot":
+        st = "INITIALIZING CORE" + "." * (tick // 3 % 4)
+    elif phase == "sweep":
+        st = f"LINKING NODES  {len(linked)}/5"
+    else:
+        st = "ALL NODES LINKED  -  ONLINE"
+    st = st.ljust(28)
+    lines.append(jv_paint([(c, 0.75) for c in " " * ((CW - len(st)) // 2) + st], hue))
+    return lines
+
+
+def jv_online_animation():
+    """Globe turning, five nodes lighting up forward and back, then everything locks green. Needs a real terminal;
+    when the output is redirected only the final picture is printed."""
+    utf = jv_can_utf8()
+    try:
+        cols, rows = shutil.get_terminal_size((100, 30))
+    except (OSError, ValueError):
+        cols, rows = 100, 30
+    cfg = jv_online_cfg(cols >= 72 and rows >= 26, utf)
+    cs, R, NW = cfg["cs"], cfg["R"], cfg["NW"]
+    linked = set()
+    if not sys.stdout.isatty():
+        sys.stdout.write("\n".join(jv_online_frame(cfg, 0.6, None, "lock", linked, "green", 0)) + "\n")
+        return
+    state = {"first": True, "tick": 0, "angle": 0.0}
+
+    def draw(phase, p, hue, spin, flash=1.0, scan=True):
+        lines = jv_online_frame(cfg, state["angle"], p, phase, linked, hue, state["tick"],
+                                scan=(state["tick"] % (2 * R + 1)) if scan else -1, flash=flash)
+        if not state["first"]:
+            sys.stdout.write("\x1b[%dA" % len(lines))
+        state["first"] = False
+        sys.stdout.write("".join(l + "\x1b[K\n" for l in lines))
+        sys.stdout.flush()
+        state["angle"] += spin
+        state["tick"] += 1
+        time.sleep(0.05)
+
+    sys.stdout.write("\x1b[?25l")
+    try:
+        try:
+            for _ in range(14):                                   # 1) core boots, globe starts turning
+                draw("boot", None, "cyan", 0.18)
+            steps = 12
+            for k in range(4):                                    # 2) the pulse runs forward, back, forward, back
+                a, b = (cs[0], cs[4]) if k % 2 == 0 else (cs[4], cs[0])
+                for i in range(steps + 1):
+                    p = a + (b - a) * i / steps
+                    for j, c in enumerate(cs):
+                        if abs(c - p) <= NW / 2:
+                            linked.add(j)
+                    draw("sweep", p, "cyan", 0.22)
+            for i in range(10):                                   # 3) everything locks on, the globe turns green
+                draw("lock", None, "green", 0.12, flash=1.0 if i % 4 < 2 else 0.78)
+        except KeyboardInterrupt:
+            pass
+        draw("lock", None, "green", 0.0, scan=False)
+    finally:
+        sys.stdout.write("\x1b[?25h" + TEXT)
+        sys.stdout.flush()
+
+
+def jv_online_kind(t):
+    """'on' for 'be online', 'go online', 'vai online', 'connettiti'...; 'off' for 'go offline'...; 'ask' for 'are you
+    online'; None otherwise (so 'open online.txt' or 'what is online banking' are left to the other readers)."""
+    s = re.sub(r"[^a-z\u00e0-\u00ff0-9' ]+", " ", t.lower())
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"^(?:(?:please|pls|per favore|ora|now|adesso|can you|could you|puoi|potresti)\s+)+", "", s)
+    s = re.sub(r"\s+(?:now|ora|adesso|please|pls|per favore|sir|signore)$", "", s)
+    pre = r"(?:(?:be|go|get|come|sii|vai|vieni|mettiti|torna|stay|resta|rimani)\s+)?"
+    if re.fullmatch(pre + r"on ?line", s) or re.fullmatch(
+            r"(?:connect|connettiti|collegati|attivati|boot up|boot|power up|initiali[sz]e|inizializzati|accenditi|go live|vai live)", s):
+        return "on"
+    if re.fullmatch(pre + r"off ?line", s) or re.fullmatch(
+            r"(?:disconnect|disconnettiti|scollegati|spegniti|power down|go dark|stand ?by)", s):
+        return "off"
+    if re.fullmatch(r"(?:are you|r u|sei|sei ancora|are you still)\s+(?:on ?line|connected|connesso|in linea)", s):
+        return "ask"
+    return None
+
+
+def jv_online_cmd(orig, t):
+    """Handles 'jarvis be online', 'jarvis go offline', 'jarvis are you online'. Only when Jarvis is named."""
+    if not CONTESTO.get("jv_named"):
+        return False
+    kind = jv_online_kind(t)
+    if kind is None:
+        return False
+    CONTESTO["jv_nostore"] = True                   # 'again' must not replay the whole animation
+    if kind == "ask":
+        if CONTESTO.get("jv_online"):
+            jarvis_say("Online, sir. All five nodes are linked. Say 'jarvis cerca <topic>' for a research summary.")
+        else:
+            jarvis_say("Not online yet, sir. Say 'jarvis be online' and I'll bring the nodes up.")
+        return True
+    if kind == "off":
+        if CONTESTO.get("jv_online"):
+            CONTESTO["jv_online"] = False
+            jarvis_say("Going offline, sir. Nodes released. Say 'jarvis be online' whenever you need me linked again.")
+        else:
+            jarvis_say("I'm already offline, sir.")
+        return True
+    if CONTESTO.get("jv_online"):
+        jarvis_say("Already online, sir. Let me show you the link once more.")
+    else:
+        jarvis_say("Initialising, sir. Bringing the nodes up...")
+    out()
+    jv_online_animation()
+    CONTESTO["jv_online"] = True
+    out()
+    out("  [ JARVIS ONLINE ]", GREEN)
+    jarvis_say("I'm online, sir. All five nodes are linked: files, games, PC, brain and security.")
+    jarvis_say("Ask me anything with 'jarvis cerca <topic>' (or 'jarvis research <topic>') and I'll bring back a summary. "
+               "Still read-only: I never change your files.")
+    return True
+
+
+# ---- research ----
+JV_RS_EXTS = "txt|csv|tsv|json|py|md|log|ini|cfg|xml|png|jpg|jpeg|gif|bmp|zip|rar|7z|pdf|exe|dll|win|db|sqlite|bat|mp3|wav|ogg"
+JV_RS_FILE_WORDS = re.compile(r"\b(?:files?|folders?|directory|directories|cartella|cartelle|lines?|righe?|riga|rows?|chunks?|"
+                              r"sprites?|rooms?|sounds?|hash|duplicat\w+|corrupt\w*|corrott\w*|selected|selezionat\w+|here|qui)\b")
+JV_RS_CONN = r"(?:\s+(?:about|on|for|su|sul|sulla|sullo|sui|sugli|di|riguardo a|riguardo|a proposito di|per))*"
+JV_RS_STRONG = (r"(?:ricercami|ricerca|research|look ?up|find out|find (?:some )?info(?:rmation)?|informati|approfondisci|"
+                r"dimmi tutto|tell me everything|cerca(?:mi)? (?:info|informazioni|notizie)|search (?:online|the web|the internet)|"
+                r"cerca (?:online|su internet|sul web|in rete))")
+JV_RS_WEAK = r"(?:cercami|cerca|cercare|search for|search|look for)"
+JV_IT_EN = {"memoria": "memory", "giochi": "games", "gioco": "game", "cartella": "folder", "disco": "disk",
+            "processore": "cpu", "sicurezza": "security", "rete": "network", "scheda": "card", "video": "video",
+            "salvataggio": "save", "salvataggi": "saves", "aggiornamento": "update", "virus": "virus",
+            "estensione": "extension", "programma": "program", "archivio": "archive", "immagine": "image"}
+
+
+def jv_rs_parse(t, sel):
+    """'cerca ram' / 'research sha256' -> (topic, strong) or None when it is really a file question
+    (quotes, a file name or extension, 'in it', a selected file with a plain 'search for')."""
+    s = re.sub(r"\s+", " ", t.lower().replace("\u2019", "'")).strip(" ,;:!?.")
+    s = re.sub(r"^(?:(?:please|pls|per favore|ora|now|adesso|puoi|potresti|can you|could you|will you|mi)\s+)+", "", s)
+    m = re.match(r"^" + JV_RS_STRONG + JV_RS_CONN + r"\s+(.+)$", s)
+    strong = bool(m)
+    if not m:
+        m = re.match(r"^" + JV_RS_WEAK + JV_RS_CONN + r"\s+(.+)$", s)
+    if not m or re.search(r"[\"\u201c\u201d`]", t):
+        return None
+    prefix = s[:m.start(1)]
+    with_on = bool(re.search(r"\b(?:su|sul|sulla|sullo|sui|sugli|about|on|riguardo|proposito)\b", prefix))
+    q = re.sub(r"\s+(?:please|pls|per favore|grazie|thanks|for me|per me)$", "", m.group(1)).strip(" ,;:!?.'\"")
+    if not q:
+        return None
+    if JV_RS_FILE_WORDS.search(q) or re.search(r"\.(?:" + JV_RS_EXTS + r")\b", q):
+        return None
+    if re.match(r"^(?:the (?:word|text|string|phrase)|la parola|il testo|la stringa|la frase)\b", q):
+        return None
+    if re.search(r"\b(?:in|inside|dentro|nel|nello|nella|within)\s+(?:it|this|that|questo|questa|quello|quella|lo|la|il|the|my|mio|mia)\b", q):
+        return None
+    if re.fullmatch(r"(?:it|this|that|lo|la|questo|questa|quello|quella)", q):
+        return None
+    if sel and not strong and not with_on:
+        return None                                  # a file is selected: a plain 'search for x' means search INSIDE it
+    return q, strong
+
+
+def jv_rs_first_sentence(text, limit=170):
+    m = re.match(r"(.+?[.!?])(?:\s|$)", text.strip())
+    s = m.group(1) if m else text.strip()
+    return s if len(s) <= limit else s[:limit - 3].rstrip() + "..."
+
+
+def jv_rs_wrap(text, width, indent):
+    lines, cur = [], ""
+    for w in str(text).split():
+        if cur and len(cur) + 1 + len(w) > width:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = (cur + " " + w).strip()
+    if cur:
+        lines.append(cur)
+    return [" " * indent + l for l in lines] or [""]
+
+
+def jv_rs_files(words, root, seconds=2.0):
+    """A read-only look around a folder (two levels deep, a few thousand entries at most): file and folder names that
+    contain a search word, and the best lines of small text files. Returns (name hits, content hits)."""
+    end = time.time() + seconds
+    me = os.path.abspath(__file__)
+    names, content, seen = [], [], 0
+    stack = [(root, 0)]
+    while stack and time.time() < end and seen < 3000:
+        d, depth = stack.pop()
+        try:
+            entries = sorted(os.scandir(d), key=lambda e: e.name.lower())
+        except OSError:
+            continue
+        for e in entries:
+            seen += 1
+            low = e.name.lower()
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    if any(w in low for w in words) and len(names) < 6:
+                        names.append((os.path.relpath(e.path, root), "folder"))
+                    if depth < 2 and not low.startswith(".") and low != "jarvis_update" and not skip_dir(e.path):
+                        stack.append((e.path, depth + 1))
+                elif e.is_file(follow_symlinks=False):
+                    if os.path.abspath(e.path) == me:
+                        continue
+                    if any(w in low for w in words) and len(names) < 6:
+                        names.append((os.path.relpath(e.path, root), human(e.stat().st_size)))
+                    if len(content) < 6 and os.path.splitext(low)[1] in TEXT_EXT and e.stat().st_size <= 262144:
+                        with open(e.path, "rb") as f:
+                            body = f.read(262144).decode("utf-8", "replace")
+                        best = []
+                        for n, line in enumerate(body.splitlines()[:4000], 1):
+                            ll = line.lower()
+                            hit = sum(1 for w in words if w in ll)
+                            if hit:
+                                best.append((hit, -n, n, line.strip()))
+                        best.sort(reverse=True)
+                        if best and (len(words) < 2 or best[0][0] >= 2 or len(best) >= 2):
+                            content.append((os.path.relpath(e.path, root), [(n, safe(x[:150])) for _, _, n, x in best[:2]]))
+            except OSError:
+                continue
+    return names, content
+
+
+def jv_research_run(query):
+    """Look the topic up in everything I know and in the current folder, then print a summary."""
+    q = re.sub(r"\s+", " ", query).strip(" ,.;:!?\"'")
+    qkey = q.lower().replace("'", "")
+    qkey = " ".join(JV_IT_EN.get(w, w) for w in qkey.split())
+    words = [w for w in re.findall(r"[a-z0-9.+#]+", qkey) if w not in JV_STOP and len(w) > 1]
+    terms = set(jv_terms(qkey))
+    found = []                                     # (label, text)
+
+    for g, txt in JV_GAMES_KB.items():             # games
+        if re.search(r"(?<![\w])" + re.escape(g) + r"(?![\w])", qkey):
+            found.append((g.title(), txt + f" Say 'jarvis open {g}' to start it."))
+    scored = []                                    # glossary
+    for keys, txt in JV_KB:
+        sc = 0.0
+        for k in keys:
+            if re.search(r"(?<![\w.])" + re.escape(k) + r"(?![\w])", qkey):
+                sc = max(sc, 3 + len(k) / 10)
+        ov = len(terms & set(jv_terms(txt)))
+        if sc == 0 and ov < 2:
+            continue
+        scored.append((sc + 0.6 * ov, keys[0], txt))
+    scored.sort(key=lambda x: -x[0])
+    for sc, k, txt in scored[:3]:
+        found.append((k.upper() if len(k) <= 5 else k.capitalize(), txt))
+    for w in words:                                # commands
+        fn = CMDLETS.get(w) if len(w) >= 3 else None
+        if fn is not None:
+            found.append(("Command " + fn.nome, f"{describe(fn.nome)}."))
+            break
+    try:
+        c = jv_compare(qkey)                       # 'ssd vs hdd'
+    except Exception:
+        c = None
+    if c:
+        found.append(("Comparison", c))
+    try:
+        hit = jv_faq_find(qkey, False)
+    except Exception:
+        hit = None
+    if hit:
+        found.append(("Q: " + hit[1][1], hit[1][2]))
+    seen_txt, uniq = set(), []
+    for lab, txt in found:                         # no entry twice
+        if txt not in seen_txt:
+            seen_txt.add(txt)
+            uniq.append((lab, txt))
+    found = uniq[:5]
+
+    root = os.getcwd()
+    fwords = [w for w in words if len(w) >= 3] or words
+    names, content = jv_rs_files(fwords, root) if fwords else ([], [])
+    try:
+        width = max(50, min(100, shutil.get_terminal_size((100, 30)).columns - 8))
+    except (OSError, ValueError):
+        width = 90
+
+    if not found and not names and not content:
+        jarvis_say(f"I searched my glossary, FAQ, games, commands and the files in this folder for '{safe(q)}', sir, "
+                   "and found nothing. I only know what I was taught: try a more specific word, or say 'jarvis examples'.")
+        if not CONTESTO.get("jv_nolog"):
+            jv_upd_log_miss("research: " + q)
+        return
+    jarvis_say(f"Research on '{safe(q)}' done, sir. Here is the summary:")
+    for lab, txt in found:
+        out(f"  [{safe(lab)}]", GREEN)
+        for l in jv_rs_wrap(txt, width, 4):
+            out(l, CYAN)
+    if names or content:
+        out(f"  [In {safe(os.path.basename(root) or root)}]", GREEN)
+        for rel, info in names:
+            out(f"    name match: {safe(rel)}  ({info})", CYAN)
+        for rel, hits in content:
+            for n, line in hits:
+                out(f"    {safe(rel)}:{n}  {line}", CYAN)
+    parts = []
+    if found:
+        parts.append(jv_rs_first_sentence(found[0][1]))
+        if len(found) > 1:
+            parts.append("Related: " + ", ".join(safe(l) for l, _ in found[1:4]) + ".")
+    nf = len({r for r, _ in names} | {r for r, _ in content})
+    if nf:
+        parts.append(f"{nf} file(s) here mention it.")
+    out()
+    jarvis_say("In short, sir: " + " ".join(parts))
+    out("  (sources: my glossary, FAQ, games and commands, plus names and small text files of the current folder; "
+        "nothing was changed)", GRAY)
+
+
+def jv_research_cmd(orig, t, sel):
+    """'jarvis cerca ...' / 'jarvis research ...': a research summary, available while online."""
+    if not CONTESTO.get("jv_named"):
+        return False
+    if re.fullmatch(r"(?:please |per favore )?(?:cerca|search|research|ricerca|look up)", t.strip().lower()):
+        jarvis_say("Search for what, sir? Say 'jarvis cerca <topic>', for example 'jarvis cerca sha256'.")
+        return True
+    p = jv_rs_parse(t, sel)
+    if p is None:
+        return False
+    if not CONTESTO.get("jv_online"):
+        jarvis_say("I'm not online yet, sir. Say 'jarvis be online' first, then ask me again and I'll research it.")
+        CONTESTO["jv_nostore"] = True
+        return True
+    try:
+        jv_research_run(p[0])
+    except KeyboardInterrupt:
+        out()
+        jarvis_say("Stopped, sir.")
+    return True
+
+
 def jv_interpret_core(texto):
     """Map a plain-language request (English or Italian) to a read-only command.
     Returns True if it understood and handled the request."""
@@ -4610,6 +5107,10 @@ def jv_interpret_core(texto):
         jarvis_status("Current status")
         return True
 
+    if jv_online_cmd(orig, t):          # 'jarvis be online' (animation), 'jarvis go offline'
+        return True
+    if jv_research_cmd(orig, t, sel):   # 'jarvis cerca <topic>' / 'jarvis research <topic>' while online
+        return True
     if CONTESTO.get("jv_named") and jv_chat(orig, t):      # small talk: 'jarvis perfect', 'yo big jarvis'
         return True
     if sel and os.path.isfile(sel) and re.search(r"\b(?:export|extract key|extract\.key)\b|\b(?:save|make|create|generate|write|give me|get|download)\b.*\b(?:report|summary file)\b", t) \
@@ -4750,6 +5251,7 @@ def jarvis_interpret(texto):
   jarvis what game is this / how many sprites / list the chunks      (for a GameMaker data.win)
   jarvis which columns / which tables / how many pages / is it 64-bit / what is inside
   jarvis biggest files / find all png files / duplicates / modified today / free disk space
+  jarvis be online              sci-fi start-up: globe + 5 nodes, then:  jarvis cerca <topic>  (summary)   jarvis go offline
   jarvis examples               shows everything I can answer
 (You can also skip the word 'jarvis': just type the request.)""")
 def jarvis_cmd(args):
@@ -6046,6 +6548,8 @@ def jv_upd_selftest():
             ("what is a vpn", ["tunnel"]), ("i want to know what a dll is", ["library"]), ("cosa significa ssd", ["solid-state"]),
             ("tell me about cry of fear", ["horror"]), ("can you calculate 12*12", ["144"]), ("jarvis ssd", ["solid-state"]),
             ("tell me about a.txt", ["SHA256"]), ("what's inside a.txt", ["First 15 lines"]),
+            ("jarvis tell me about a.txt", ["SHA256"]), ("jarvis what's inside a.txt", ["First 15 lines"]),
+            ("jarvis free disk space", ["free"]), ("jarvis duplicates", ["identical"]), ("jarvis by extension", [".txt"]),
         ]
         for text, need in phrases:
             run(f"jarvis: {text}", say(text), need=need)
@@ -6092,6 +6596,42 @@ def jv_upd_selftest():
                     raise RuntimeError(f"'{no}' was taken for maintenance")
             print("ok")
         run("the phrases that start maintenance mode", wording)
+
+        section("Online mode and research")
+        def online_wording():
+            for yes in ("be online", "go online", "online", "vai online", "sii online", "connettiti", "boot up"):
+                if jv_online_kind(yes) != "on":
+                    raise RuntimeError(f"'{yes}' does not bring me online")
+            for yes in ("go offline", "be offline", "offline", "disconnettiti"):
+                if jv_online_kind(yes) != "off":
+                    raise RuntimeError(f"'{yes}' does not take me offline")
+            for no in ("open online.txt", "find my games", "how many lines", "what is online banking"):
+                if jv_online_kind(no):
+                    raise RuntimeError(f"'{no}' was taken for the online switch")
+            print("ok")
+        run("the phrases that switch online and offline", online_wording)
+        def online_flow():
+            CONTESTO["jv_online"] = False
+            if not jarvis_interpret("jarvis research ram"):
+                raise RuntimeError("Jarvis did not understand it")
+            if not jarvis_interpret("jarvis be online"):
+                raise RuntimeError("Jarvis did not understand it")
+            if not CONTESTO.get("jv_online"):
+                raise RuntimeError("I did not come online")
+        run("jarvis be online (research refused while offline, then the animation)", online_flow, need=["not online", "ONLINE"])
+        run("jarvis cerca ram (research summary)", say("jarvis cerca ram"), need=["Research on", "In short"])
+        run("jarvis research sha256 (works with a file selected too)", say("jarvis research sha256"), need=["Research on", "In short"])
+        run("jarvis cerca a topic nobody taught me", say("jarvis cerca zzzqqqxx"), need=["found nothing"])
+        def search_stays_a_file_question():
+            CONTESTO["jv_online"] = True
+            n = 0
+            for phrase in ('jarvis search for "alpha"', "jarvis cerca alpha in notes.txt"):
+                if jv_rs_parse(phrase.replace("jarvis ", "", 1), None) is not None:
+                    raise RuntimeError(f"'{phrase}' was taken for a research")
+                n += 1
+            print("ok")
+        run("quoted words and file names are not researched", search_stays_a_file_question)
+        run("jarvis go offline", say("jarvis go offline"), need=["offline"])
 
         section("Game launcher (nothing is started)")
         def match():
@@ -6189,8 +6729,10 @@ def jv_upd_selftest():
             except (OSError, NotImplementedError, AttributeError):
                 print("(this system does not allow links here: skipped)")
                 return
-            jv_upd_check(link, None)
-        run("a link instead of a plain file is refused (check 1)", linked, need=["BLOCKED"], red=True)
+            ok_, phase_, _why = jv_upd_check(link, None)
+            if ok_ or phase_ != "valid source":
+                raise RuntimeError("a link was accepted as an update")
+        run("a link instead of a plain file is refused (check 1)", linked, need=[], red=True)
         run("log lines cannot be forged or carry escape codes", lambda: print(
             "clean" if jv_upd_clean("a\nb\x1b[31m c\u202e") == "a b [31m c" else (_ for _ in ()).throw(
                 RuntimeError(repr(jv_upd_clean("a\nb\x1b[31m c\u202e"))))))
