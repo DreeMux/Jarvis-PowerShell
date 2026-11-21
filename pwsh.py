@@ -65,6 +65,9 @@ RED     = fg(255, 0, 0)          # errori
 GREEN   = fg(0, 255, 0)
 CYAN    = fg(0, 255, 255)
 GRAY    = fg(128, 128, 128)
+JV_SEC_G = fg(0, 255, 70)       # security panels: terminal green
+JV_SEC_D = fg(0, 150, 50)       # dim green
+JV_SEC_A = fg(255, 176, 0)      # amber warnings
 HEADER_COLOR = TEXT              # intestazioni tabelle: classico = testo normale
 
 try:
@@ -1612,6 +1615,9 @@ def jarvis_greeting():
     jarvis_say("Hunter, game locator, file inspector and resource monitor are standing by. "
                "Everything I do is read-only, except updating myself or starting a game when you ask.")
     jarvis_status("Current status")
+    sl = jv_upd_secline()
+    if sl:
+        out(sl[0], JV_SEC_G if sl[1] else RED)
     jarvis_say('Type "help" for commands, or just tell me what you need: '
                '"find my games", "scan this PC for corrupt files".')
     jv_upd_show_report()
@@ -3745,10 +3751,21 @@ def jv_upd_run(path, cwd, stdin_text, limit=20):
     return r.returncode, r.stdout, r.stderr, time.perf_counter() - t0
 
 
+def jv_upd_box(title, color=None):
+    """A plain ASCII panel header (looks the same in every Windows console)."""
+    w = 62
+    color = color or JV_SEC_G
+    out("+" + "-" * (w - 2) + "+", color)
+    out("| " + title[:w - 4].ljust(w - 4) + " |", color)
+    out("+" + "-" * (w - 2) + "+", color)
+
+
 def jv_upd_phase(i, ok, detail=""):
     name = JV_UPD_PHASES[i - 1]
-    out(f"  [{i}/{len(JV_UPD_PHASES)}] {name.ljust(15)} {'OK    ' if ok else 'FAILED'} {detail}".rstrip(),
-        GREEN if ok else RED)
+    n = len(JV_UPD_PHASES)
+    bar = "#" * i + "-" * (n - i)
+    out(f"  {'[+]' if ok else '[!]'} [{bar}] {i}/{n} {name.ljust(15, '.')} {'PASS' if ok else 'BLOCKED'} {detail}".rstrip(),
+        JV_SEC_G if ok else RED)
     return ok
 
 
@@ -4029,7 +4046,8 @@ def jv_upd_restart(fresh_window):
 def jv_upd_countdown(work, incoming, why):
     """Refused update: 'delete' within the time keeps the window and deletes it; silence closes this session."""
     out()
-    out(f"UPDATE REFUSED: {why}", RED)
+    jv_upd_box("SECURITY GATE // PATCH BLOCKED", RED)
+    out(f"[!] UPDATE REFUSED: {why}", RED)
     out("Nothing was installed and Jarvis is untouched.", GRAY)
     out(f"Type  delete  within {JV_UPD_SECONDS} seconds to throw the update away and keep this window.", YELLOW)
     out("No answer: this window closes, the update goes to quarantine and a fresh, intact Jarvis opens.", YELLOW)
@@ -4259,8 +4277,9 @@ def jv_upd_cmd(args):
             out()
             return
         out()
-        out(f"Update source: {safe(label)}", CYAN)
-        out(f"Running the {len(JV_UPD_PHASES)} safety checks...", GRAY)
+        jv_upd_box("SECURITY GATE // PATCH VERIFICATION")
+        out(f"[*] source : {safe(label)}", JV_SEC_D)
+        out(f"[*] running the {len(JV_UPD_PHASES)} safety checks (a single failure blocks the patch)", JV_SEC_D)
         ok, phase, why = jv_upd_check(work, sha)
         if not ok:
             if dry:
@@ -4271,6 +4290,7 @@ def jv_upd_cmd(args):
             work = None
             return
         if dry:
+            out(f"[+] PATCH VERIFIED {len(JV_UPD_PHASES)}/{len(JV_UPD_PHASES)} gates passed", JV_SEC_G)
             out(f"Dry run: all {len(JV_UPD_PHASES)} checks passed. Nothing was installed.", GREEN)
             out()
             return
@@ -4286,6 +4306,7 @@ def jv_upd_cmd(args):
         jv_upd_discard(work, incoming)
         work = None
         out()
+        out(f"[+] PATCH VERIFIED {len(JV_UPD_PHASES)}/{len(JV_UPD_PHASES)} gates passed", JV_SEC_G)
         out("All checks passed. The new version is installed.", GREEN)
         out(f"Backup of the old version: {safe(backup)}", GRAY)
         out("Restarting Jarvis with the new version...", GRAY)
@@ -4296,33 +4317,56 @@ def jv_upd_cmd(args):
 
 
 # ---------------- maintenance (read-only health check) ----------------
+def jv_upd_secline():
+    """One compact line about the security state of this file, or None when it cannot be read."""
+    import ast
+    me = os.path.abspath(__file__)
+    try:
+        with open(me, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        viol = len(jv_upd_scan(tree))
+        prot = len(jv_upd_protected(tree))
+        try:
+            nb = sum(1 for n in os.listdir(os.path.join(jv_upd_dir(), "backups")) if n.lower().endswith(".py"))
+        except OSError:
+            nb = 0
+        return (f"[{'+' if not viol else '!'}] SECURITY  scan {viol} violation(s)  |  {prot} protected  |  "
+                f"{len(JV_UPD_PHASES)} patch gates armed  |  {nb} backup(s)", not viol)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return None
+
+
 def jv_upd_health(args):
-    """Read-only health check of Jarvis (integrity, security scan, backups, log)."""
+    """Read-only security status of Jarvis (integrity, security scan, backups, log)."""
     import ast
     me = os.path.abspath(__file__)
     out()
-    out("JARVIS maintenance check (read-only)", YELLOW)
+    jv_upd_box("SECURITY STATUS // INTEGRITY REPORT  (read-only)")
+
+    def row(ok, key, text, color=None):
+        out(f"  {'[+]' if ok else '[!]'} {key.ljust(13, '.')} {text}", color or (JV_SEC_G if ok else RED))
     try:
         with open(me, encoding="utf-8") as f:
             src = f.read()
         tree = ast.parse(src)
-        out(f"  Program      : {safe(me)}  ({human(len(src.encode('utf-8')))}, sha256 {jv_upd_sha_of(me)[:16]}...)", GREEN)
+        row(True, "PROGRAM", f"{safe(me)}")
+        row(True, "FINGERPRINT", f"sha256 {jv_upd_sha_of(me)[:32]}  ({human(len(src.encode('utf-8')))})")
     except (OSError, SyntaxError, UnicodeDecodeError) as e:
-        out(f"  Program      : cannot be checked ({e})", RED)
+        row(False, "PROGRAM", f"cannot be checked ({e})")
         out()
         return
     err, data = jv_upd_data_block(src)
     if err:
-        out(f"  Data block   : {err}", RED)
+        row(False, "DATA BLOCK", err)
     else:
         alive = sum(1 for d in data["game_dirs"] if os.path.isdir(d))
-        out(f"  Data block   : version {data['version']}, last update '{data['updated'] or 'never'}', "
-            f"{alive}/{len(data['game_dirs'])} learned game folder(s) still there", GREEN)
+        row(True, "DATA BLOCK", f"version {data['version']}, last update '{data['updated'] or 'never'}', "
+                                f"{alive}/{len(data['game_dirs'])} learned game folder(s) still there")
     found = jv_upd_scan(tree)
-    out(f"  Security scan: {'0 violations' if not found else str(len(found)) + ' violation(s), first: ' + found[0]}",
-        GREEN if not found else RED)
+    row(not found, "CODE SCAN", "0 violations" if not found else f"{len(found)} violation(s), first: {found[0]}")
     prot = jv_upd_protected(tree)
-    out(f"  Protected    : {len(prot)} updater/launcher item(s)", GREEN)
+    row(True, "PROTECTED", f"{len(prot)} updater/launcher item(s) locked: an update that changes them is refused")
+    row(True, "PATCH GATES", " > ".join(JV_UPD_PHASES))
     base = jv_upd_dir()
 
     def count(sub, ext=".py"):
@@ -4331,19 +4375,26 @@ def jv_upd_health(args):
         except OSError:
             return []
     backups = count("backups")
-    out(f"  Backups      : {len(backups)}" + (f", newest {safe(backups[-1])}" if backups else ""),
-        GREEN if backups else GRAY)
-    out(f"  Quarantine   : {len(count('rejected'))} rejected update(s)", GRAY)
-    out(f"  Incoming     : {len(count('incoming'))} update(s) waiting", GRAY)
+    row(bool(backups), "BACKUPS", f"{len(backups)}" + (f", newest {safe(backups[-1])}" if backups else " (made before every install)"),
+        JV_SEC_G if backups else JV_SEC_A)
+    row(True, "QUARANTINE", f"{len(count('rejected'))} rejected update(s)", JV_SEC_D)
+    row(True, "INCOMING", f"{len(count('incoming'))} update(s) waiting", JV_SEC_D)
     try:
         with open(os.path.join(base, "update.log"), encoding="utf-8", errors="replace") as f:
             last = f.read().splitlines()[-5:]
     except OSError:
         last = []
-    out("  Last log     : " + ("(none yet)" if not last else ""), GRAY)
+    row(True, "LOG", "(no events yet)" if not last else "last events:", JV_SEC_D)
     for ln in last:
-        out("    " + safe(ln)[:150], GRAY)
+        out("      " + safe(ln)[:150], JV_SEC_D)
     out()
+
+
+@cmdlet("Get-SecurityStatus", "security", "secstat", group="Assistant", usage="""Get-SecurityStatus     security panel: file fingerprint, code scan, protected items, patch gates, backups, quarantine, log
+(read-only; alias: security)""")
+def jv_upd_security_cmd(args):
+    """Security panel of Jarvis (fingerprint, code scan, patch gates, backups, log)."""
+    jv_upd_health([])
 
 
 def jv_upd_png(truncate=False):
@@ -4597,7 +4648,8 @@ def jv_upd_selftest():
             ("launcher", os.path.join(tmp, "a.txt"), None)), need=["I won't start"])
 
         section("Update system (checks only, nothing is installed)")
-        run("implement jarvis -Dry (9 safety checks)", cmd("Implement", "jarvis", "-Dry"), bad=["would be REFUSED"], red=False)
+        run("Get-SecurityStatus panel", cmd("Get-SecurityStatus"), need=["SECURITY STATUS", "FINGERPRINT", "CODE SCAN"])
+        run("implement jarvis -Dry (9 safety checks)", cmd("Implement", "jarvis", "-Dry"), need=["SECURITY GATE"], bad=["would be REFUSED", "BLOCKED"], red=False)
 
         exts = [n for n in NOMI if GROUPS.get(n) == "Extensions"]
         if exts:
