@@ -356,7 +356,7 @@ def is_zip(kind):
 def detect_kind(path):
     ext = os.path.splitext(path)[1].lower()
     try:
-        with open(path, "rb") as f:
+        with open(guard_path(path), "rb") as f:
             head = f.read(4096)
     except OSError:
         return "Unreadable"
@@ -385,7 +385,7 @@ def detect_kind(path):
 
 
 def read_text(path, limit=MAX_TEXT):
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         raw = f.read(limit)
     if raw[:2] in BOMS16:
         return raw.decode("utf-16", errors="replace"), "UTF-16"
@@ -405,7 +405,7 @@ def digests(path):
         md = hashlib.md5(usedforsecurity=False)
     except TypeError:
         md = hashlib.md5()
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             sha.update(chunk)
             md.update(chunk)
@@ -414,7 +414,7 @@ def digests(path):
 
 def image_size(path, kind):
     try:
-        with open(path, "rb") as f:
+        with open(guard_path(path), "rb") as f:
             head = f.read(32)
             if kind == "PNG image" and len(head) >= 24:
                 return struct.unpack(">II", head[16:24])
@@ -502,6 +502,14 @@ def device_path(p, win=None):
         if stem in DEVICE_NAMES:
             return True
     return False
+
+
+def guard_path(p):
+    """The path itself, or FileNotFoundError for a Windows device name (CON, NUL...): it then follows the same
+    road as a missing file, because opening a device would wait for input forever."""
+    if device_path(p):
+        raise FileNotFoundError(p)
+    return p
 
 
 def resolve_existing(pos, cmd):
@@ -631,7 +639,7 @@ def extract_port(args):
                      ("Bytecode", str(gm["bytecode"])), ("Chunks", f"{len(gm['chunks'])}: " + ", ".join(gm["chunks"][:12]))]
             rows += [("Warning", n) for n in gm["notes"]]
         elif kind == "PDF document":
-            with open(path, "rb") as f:
+            with open(guard_path(path), "rb") as f:
                 rows.append(("PdfVersion", safe(f.read(8).decode("latin-1").strip())))
     except OSError as e:
         rows.append(("Warning", f"Read error while analysing ({e.strerror})"))
@@ -696,7 +704,7 @@ def preview(path, kind, size):
         dim = image_size(path, kind)
         out(f"  Image, {dim[0]} x {dim[1]} pixels." if dim else "  Image (dimensions could not be read).")
     elif kind == "PDF document":
-        with open(path, "rb") as f:
+        with open(guard_path(path), "rb") as f:
             raw = f.read(20 * 1024 * 1024)
         pages = len(re.findall(rb"/Type\s*/Page[^s]", raw))
         out(f"  PDF version: {safe(raw[:8].decode('latin-1').strip())}  |  approx. pages: {pages or 'unknown'}")
@@ -709,7 +717,7 @@ def preview(path, kind, size):
         if total > len(tables):
             out(f"  ... and {total - len(tables)} more", GRAY)
     else:
-        with open(path, "rb") as f:
+        with open(guard_path(path), "rb") as f:
             data = f.read(128)
         out("  Binary content, hex preview of the first 128 bytes (never executed):")
         for row in hexdump(data):
@@ -763,7 +771,7 @@ def check_zip(path):
 
 
 def check_png(path):
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         if f.read(8) != b"\x89PNG\r\n\x1a\n":
             return "Invalid PNG signature"
         while True:
@@ -785,13 +793,13 @@ def check_png(path):
 
 def tail_of(path, n=2048):
     size = os.path.getsize(path)
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         f.seek(max(0, size - n))
         return f.read()
 
 
 def check_jpeg(path):
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         if f.read(3) != b"\xff\xd8\xff":
             return "Invalid JPEG signature"
     if not tail_of(path, 64).rstrip(b"\x00").endswith(b"\xff\xd9"):
@@ -799,7 +807,7 @@ def check_jpeg(path):
 
 
 def check_gif(path):
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         if f.read(6) not in (b"GIF87a", b"GIF89a"):
             return "Invalid GIF signature"
     if not tail_of(path, 64).rstrip(b"\x00").endswith(b"\x3b"):
@@ -807,7 +815,7 @@ def check_gif(path):
 
 
 def check_pdf(path):
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         if f.read(5) != b"%PDF-":
             return "Missing %PDF- header"
     if b"%%EOF" not in tail_of(path):
@@ -815,7 +823,7 @@ def check_pdf(path):
 
 
 def check_json(path):
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         raw = f.read()
     try:
         json.loads(raw.decode("utf-8-sig"))
@@ -841,7 +849,7 @@ def check_gzip(path):
 
 
 def check_sqlite(path):
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         if f.read(16) != b"SQLite format 3\x00":
             return "Missing SQLite header"
     con = None
@@ -886,7 +894,7 @@ def check_file(path):
             if reason:
                 return "CORRUPT", reason
         else:
-            with open(path, "rb") as f:
+            with open(guard_path(path), "rb") as f:
                 head = f.read(65536)
             if head[:2] not in BOMS16 and b"\x00" in head:
                 return "WARNING", "Contains NUL bytes (damaged, or not really a text file)"
@@ -1047,7 +1055,7 @@ def gm_read_info(path):
     """Read-only peek at a GameMaker data.win (a FORM container). Never modifies it."""
     info = {"ok": False, "notes": [], "chunks": [], "name": None, "gm": None, "bytecode": None}
     size = os.path.getsize(path)
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         head = f.read(8)
         if len(head) < 8 or head[:4] != b"FORM":
             info["notes"].append("Missing FORM header (not a GameMaker data file, or damaged)")
@@ -2269,7 +2277,7 @@ def jv_gm_chunks(path):
     """[(chunk id, data start, data length)] of a GameMaker data file."""
     res = []
     size = os.path.getsize(path)
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         head = f.read(8)
         if len(head) < 8 or head[:4] != b"FORM":
             return res
@@ -2291,14 +2299,14 @@ def jv_gm_chunks(path):
 def jv_gm_count(path, start, ln):
     if ln < 4:
         return None
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         f.seek(start)
         cnt = struct.unpack("<I", f.read(4))[0]
     return cnt if cnt * 4 + 4 <= ln else None
 
 
 def jv_pe(path):
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         mz = f.read(64)
         if len(mz) < 64 or mz[:2] != b"MZ":
             return None
@@ -2390,7 +2398,7 @@ def jv_search(path, term, kind, name):
         out()
         return
     limit = 64 << 20
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         data = f.read(limit)
     hits = []
     for enc_name in ("utf-8", "utf-16-le"):
@@ -2440,7 +2448,7 @@ def jv_corrupt_q(path, kind, name, ext):
         jarvis_say(f"No damage found, sir. {name} is readable text with no stray NUL bytes.")
     else:
         try:
-            with open(path, "rb") as f:
+            with open(guard_path(path), "rb") as f:
                 f.read(65536)
             tail_of(path, 4096)
             jarvis_say(f"I found no sign of damage in {name}, sir, but I have no integrity test for this file type: "
@@ -2756,7 +2764,7 @@ def jv_csv_q(path, t, orig, name):
 def jv_pdf_q(path, t, name):
     if not re.search(r"\bpages?\b|\bpagine\b|\bencrypt\w*\b|\bpassword\b|\bcifrat\w+\b", t):
         return False
-    with open(path, "rb") as f:
+    with open(guard_path(path), "rb") as f:
         raw = f.read(20 * 1024 * 1024)
     pages = len(re.findall(rb"/Type\s*/Page[^s]", raw))
     enc = b"/Encrypt" in raw
@@ -2883,7 +2891,7 @@ def jv_file_q(orig, t, path, explicit):
         mo = re.search(r"\boffset\s+(0x[0-9a-f]+|\d+)\b", t)
         n = min(int(mn.group(1)), 512) if mn else 128
         off = int(mo.group(1), 16 if mo.group(1).startswith("0x") else 10) if mo else 0
-        with open(path, "rb") as f:
+        with open(guard_path(path), "rb") as f:
             f.seek(min(off, size))
             data = f.read(n)
         jarvis_say(f"{len(data)} byte(s) of {name} from offset 0x{off:X} (viewing only, nothing is executed):")
@@ -2986,7 +2994,7 @@ def jv_file_q(orig, t, path, explicit):
                 with zipfile.ZipFile(path) as z:
                     extra = f" Unpacked it would be about {human(sum(i.file_size for i in z.infolist()))}."
             elif kind == "GZIP archive" and size >= 4:
-                with open(path, "rb") as f:
+                with open(guard_path(path), "rb") as f:
                     f.seek(-4, 2)
                     extra = f" Unpacked it would be about {human(struct.unpack('<I', f.read(4))[0])} (from the gzip trailer)."
         except (OSError, zipfile.BadZipFile):
@@ -4569,7 +4577,7 @@ def jv_misses_show():
     """'jarvis what didn't you understand': the last phrases I could not handle."""
     path = os.path.join(jv_upd_dir(), "unknown_phrases.log")
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
+        with open(guard_path(path), encoding="utf-8", errors="replace") as f:
             lines = [l.rstrip() for l in f if l.strip()]
     except OSError:
         lines = []
@@ -5825,6 +5833,9 @@ def jv_interpret_core(texto):
 def jarvis_interpret(texto):
     """Understand a plain-language request. Also: 'again' repeats the last one, and obvious typos of my own
     keywords are repaired when the first reading finds nothing."""
+    if len(texto) > JV_MAX_REQUEST:
+        jarvis_say(f"That request is {len(texto):,} characters long, sir. I read up to {JV_MAX_REQUEST:,}: please shorten it.")
+        return True
     low = re.sub(JV_NAMED_RE, " ", texto, flags=re.I).lower()
     mh = re.fullmatch(r"\W*(?:hack|hackera|hackerati|auto-?hack)\s+(?:yourself|your ?self|te stesso|tu stesso)"
                       r"(\s+(?:report only|no heal|dry))?\W*", low.strip())
@@ -5869,6 +5880,7 @@ class JvSink:
         return False
 
 
+JV_MAX_REQUEST = 2000                          # nobody types more; refusing early also stops cheap slow-down attacks
 JV_HACK_ONCE = ("get-securitystatus",)         # ignores its arguments and runs a fixed, heavy check: one attack proves it
 JV_HACK_WHOLE_PC = ("denux.hunter",)          # with no target these scan the whole computer: not a bug, not attacked bare
 JV_HACK_SKIP = ("exit", "implement", "jarvis", "launch", "maintenance", "voice", "extract.key", "clear-host")
@@ -5881,7 +5893,8 @@ JV_HACK_PAYLOADS = (
     ("bidi override", "\u202etxt.exe"), ("zero width", "a\u200bb"), ("lone surrogate", "\ud800"),
     ("unicode", "\u00e9\u4e16\u754c\U0001F642"), ("format string", "{0.__class__}"), ("format string", "%s%s%s%n"),
     ("template", "{{7*7}}${7*7}"), ("shell chars", "; echo x && echo y | cat `id` $(id)"),
-    ("quotes", "'\"'\"'"), ("reserved name", "CON"), ("reserved name", "nul.txt"), ("long path", "a" * 5000),
+    ("quotes", "'\"'\"'"), ("reserved name", "CON"), ("reserved name", "nul.txt"), ("reserved name", "COM1"),
+    ("reserved name", "aux.log"), ("device path", "\\\\.\\CON"), ("long path", "a" * 5000),
     ("huge input", "A" * 50000), ("digit flood", "9" * 4000), ("minus flood", "-" * 5000),
     ("deep nesting", "(" * 3000 + ")" * 3000), ("regex bomb", "a" * 3000 + "!"), ("regex bomb", "(" * 40 + "a" * 40),
     ("space flood", " " * 5000 + "x"), ("option flood", " ".join(["-x"] * 500)),
@@ -6102,6 +6115,16 @@ def jv_hack_dynamic(split):
                     split.say("Too many hangs, stopping the attack here.", JV_SEC_A)
                     return stats["done"], crashes, hangs
         split.say("Attacking the plain-language reader ...", TEXT)
+        sys.stdout = JvSink()
+        try:
+            base_res, base_took, _ = jv_hack_attempt(lambda: jarvis_interpret("status"), 30.0)
+        finally:
+            sys.stdout = saved_out
+            try:
+                os.chdir(saved_cwd)
+            except OSError:
+                pass
+        lim[0] = min(20.0, max(3.0, base_took * 4 + 1.5)) if base_res != "hang" else 20.0
         for pre in JV_HACK_PREFIXES:
             for fam, pay in JV_HACK_PAYLOADS:
                 CONTESTO["riga"] = pre + pay
