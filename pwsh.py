@@ -19,9 +19,10 @@
 Run:  python pwsh.py      (Windows: double-click START.bat)
 Type  help  or just talk to it:  "find my games", "scan this PC for corrupt files".
 
-Everything here is READ-ONLY: nothing of yours is ever written, moved or deleted. Only two things you
+Everything here is READ-ONLY: nothing of yours is ever written, moved or deleted. Only three things you
 ask for explicitly go further: "implement jarvis" (updates this very file, after 9 safety checks and
-with a backup) and "jarvis open <game>" (starts the game's own program).
+with a backup), "jarvis open <game>" (starts the game's own program) and "extract.key" (saves a NEW
+report file in Downloads). I also keep a list of sentences I did not understand (jarvis_update/).
 Optional: pip install psutil  (live memory/CPU of a running game in pluton.key).
 Optional extensions: put .py files in a folder named ext/ next to this file.
 """
@@ -1616,7 +1617,7 @@ def jarvis_status(intro="Systems nominal, sir"):
 def jarvis_greeting():
     jarvis_say(f"JARVIS online. {part_of_day()}, sir.")
     jarvis_say("Hunter, game locator, file inspector and resource monitor are standing by. "
-               "Everything I do is read-only, except updating myself or starting a game when you ask.")
+               "Everything I do is read-only, except what you ask for: updating myself, starting a game or saving a report.")
     jarvis_status("Current status")
     sl = jv_upd_secline()
     if sl:
@@ -3403,7 +3404,7 @@ JV_SUGGEST = ["find my games", "scan this PC for corrupt files", "open <file>", 
               "biggest files", "find all png files", "duplicates", "modified today", "free disk space", "status",
               "what time is it", "go in maintenance", "implement jarvis", "examples", "what is a dll",
               "calculate 15% of 80", "convert 5 km to miles", "how many days until christmas", "tell me a joke",
-              "what does dir do", "tell me about undertale", "security status", "again"]
+              "what does dir do", "tell me about undertale", "security status", "again", "what didn't you understand"]
 
 
 def jv_pick(*opts):
@@ -3594,7 +3595,7 @@ for _k, _t in (
     ("mkv", "A flexible video container that can hold many audio and subtitle tracks."),
     ("exe|executable", "A Windows program. Opening it RUNS it, so only open ones you trust."),
     ("dll", "A shared library: code that several programs borrow. Many live in the Windows folder, which I refuse to open."),
-    ("sys|driver", "A driver or system component file: part of Windows or hardware support. Leave those alone."),
+    ("sys|system file", "A driver or system component file: part of Windows or hardware support. Leave those alone."),
     ("msi", "A Windows installer package."),
     ("bat|cmd|batch", "A batch script: a list of old-style Windows commands run one after another."),
     ("ps1|powershell script", "A PowerShell script: a file of PowerShell commands."),
@@ -3655,11 +3656,11 @@ for _k, _t in (
     ("path", "The address of a file, like C:\\Users\\you\\Downloads\\file.txt."),
     ("folder|directory", "A container for files and other folders."),
     ("cache", "Saved copies a program keeps to be faster next time. Safe to clear, it gets rebuilt."),
-    ("mod", "A modification of a game made by fans. Cry of Fear started as one."),
+    ("mod|mods|modding", "A modification of a game, usually made by fans (Cry of Fear started as one). Put mods only in a copy: keep the original files safe."),
     ("duplicate|duplicates", "Two files with exactly the same contents. I find them by comparing fingerprints."),
     ("malware", "Software made to harm or spy: viruses, ransomware, trojans. I am not an antivirus; use Windows Security."),
     ("antivirus", "A program that scans for malware. Windows Security is built in. I only check files for damage."),
-    ("fps", "Frames per second: how many images a game draws each second. 60 feels smooth."),
+    ("fps", "Frames per second: how many images a game draws each second (60 feels smooth). FPS can also mean a first-person shooter, depending on the context."),
     ("drm", "Digital rights management: copy protection that ties a game to an account or a launcher."),
     ("api", "A set of rules that lets one program ask another for something."),
     ("pip", "Python's package installer: pip install psutil."),
@@ -3857,8 +3858,6 @@ for _k, _t in (
     ("patch", "A small update that fixes bugs or changes a program."),
     ("beta|alpha", "Early versions of a program or game, shared for testing before the final release."),
     ("dlc", "Downloadable content: extra levels or items sold or given after a game's release."),
-    ("fps game|fps", "FPS means frames per second (how smooth a game looks), or a first-person shooter, depending on the context."),
-    ("mod|mods|modding", "A modification that changes or extends a game. Put mods only in a copy: keep the original files safe."),
     ("savegame|save file|savefile|saves", "The file where a game stores your progress. Back it up before updating or modding a game."),
     ("launcher", "A small program that starts a game (and often updates it): Steam, Epic, GOG Galaxy, or the game's own."),
     ("emulator|emulation", "A program that imitates another machine (a console, an old PC) so its games run on yours."),
@@ -3899,7 +3898,6 @@ for _k, _t in (
     ("appdata", "A hidden folder (C:\\Users\\you\\AppData) where programs and many games keep settings and saves."),
     ("program files", "The folder where Windows programs are installed (C:\\Program Files and Program Files (x86))."),
     ("recycle bin", "Where deleted files wait before being erased for good. Empty it to free the space."),
-    ("shortcut", "A small .lnk file that points to a program or folder somewhere else."),
     ("environment variable|env var", "A named setting Windows gives to programs, like PATH or USERNAME."),
     ("hash collision", "Two different files with the same hash. Practically impossible with SHA-256."),
     ("magic number|file signature|header", "The first bytes of a file that tell what type it is: PNG starts with 89 50 4E 47, ZIP with PK."),
@@ -4113,9 +4111,6 @@ JV_FAQ = [
     ("jarvis safe dangerous delete files harm", "Is Jarvis safe to use?",
      "I am designed to be read-only: I read, count, search and describe files, and I only write when I update myself or when you ask me to export a report. "
      "I never change your own files, and the update guard blocks code that deletes, downloads or runs things. Say 'security' to see the guard."),
-    ("jarvis commands list what can do help", "What can Jarvis do?",
-     "Find games and data.win files, inspect any file (size, type, hash, text, tables, zip contents, images), find corrupt files, show battery, memory and disk, "
-     "start your installed games, calculate and convert, explain tech terms, and test all of itself with 'go in maintenance'. Say 'examples' for a full list."),
     ("jarvis wrong didnt understand fix teach learn", "What if Jarvis doesn't understand me?",
      "Try rewording it in plain words, or say 'examples'. If a phrase should work and does not, tell the developer (your assistant) the exact sentence and it can be taught."),
     ("select file selected port tools use", "How do I select a file for the port tools?",
@@ -4223,27 +4218,35 @@ def jv_terms(text):
     return [jv_stem(w) for w in re.findall(r"[a-z0-9.+#]+", text.lower().replace("'", "")) if w not in JV_STOP and len(w) > 1]
 
 
-def jv_faq_find(t):
+def jv_faq_find(t, single_ok=True):
     """Best-matching FAQ entry for a question, as (score, entry) or None: simple weighted keyword retrieval."""
     q = set(jv_terms(t))
     if not q:
         return None
-    docs = [(set(jv_terms(k + " " + qu)), set(jv_terms(k)), (k, qu, a)) for k, qu, a in JV_FAQ]
-    df = {}
-    for d, _, _ in docs:
-        for w in d:
-            df[w] = df.get(w, 0) + 1
+    if not CONTESTO.get("jv_faq_idx") or CONTESTO["jv_faq_idx"][0] != len(JV_FAQ):
+        docs = [(set(jv_terms(k + " " + qu)), set(jv_terms(k)), (k, qu, a)) for k, qu, a in JV_FAQ]
+        df = {}
+        for d, _, _ in docs:
+            for w in d:
+                df[w] = df.get(w, 0) + 1
+        CONTESTO["jv_faq_idx"] = (len(JV_FAQ), docs, df)
+    _, docs, df = CONTESTO["jv_faq_idx"]
     n = len(docs)
-    best = None
+    scored = []
     for d, keys, e in docs:
         hit = q & d
         if not hit:
             continue
         sc = sum(math.log(1 + n / df[w]) * (1.6 if w in keys else 1.0) for w in hit)
         sc += 0.5 * len(hit) / max(len(q), 1)
-        if best is None or sc > best[0]:
-            best = (sc, len(hit), e)
-    if best and best[1] >= 2:
+        scored.append((sc, len(hit), e))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: -x[0])
+    best = scored[0]
+    if best[1] >= 2:
+        return best[0], best[2]
+    if single_ok and (len(scored) == 1 or best[0] >= 1.4 * scored[1][0]):     # one distinctive word and a clear winner
         return best[0], best[2]
     return None
 
@@ -4276,6 +4279,8 @@ def jv_compare(t):
 def jv_brain(orig, t):
     """The local 'AI-like' layer: comparisons, how-to / why / troubleshooting retrieval. Only for PC, file and game topics."""
     s = t.strip().rstrip("?!. ").replace("’", "'")
+    if re.match(r"^(?:select|open|read|show|cd|go|use|choose|pick|deselect|seleziona|apri|leggi)\b", s):
+        return False                   # commands on files belong to the file handlers, not to the how-to answers
     c = jv_compare(s)
     if c:
         jarvis_say(c)
@@ -4286,7 +4291,8 @@ def jv_brain(orig, t):
     named = CONTESTO.get("jv_named")
     if not (q or (named and len(s.split()) >= 2)):
         return False
-    hit = jv_faq_find(s + (" jarvis" if CONTESTO.get("jv_said_name") else ""))
+    one = not CONTESTO.get("file") and not re.search(r"\b(?:it|its|this|that|them|these|those)\b", s)   # 'how big is it' is about a file
+    hit = jv_faq_find(s + (" jarvis" if CONTESTO.get("jv_said_name") else ""), one)
     if not hit:
         return False
     sc, (k, qu, a) = hit
@@ -4484,14 +4490,48 @@ def jv_typofix(texto):
     return " ".join(out_t) if changed else texto
 
 
+def jv_upd_log_miss(text):
+    """Remember a sentence Jarvis did not understand (one line, in jarvis_update/unknown_phrases.log), so it can be taught."""
+    text = re.sub(r"\s+", " ", text).strip()[:200]
+    if not text or CONTESTO.get("jv_nolog"):
+        return
+    try:
+        path = os.path.join(jv_upd_sub("."), "unknown_phrases.log")
+        if os.path.isfile(path) and os.path.getsize(path) > 200_000:
+            return
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {text}\n")
+    except OSError:
+        pass
+
+
+def jv_misses_show():
+    """'jarvis what didn't you understand': the last phrases I could not handle."""
+    path = os.path.join(jv_upd_dir(), "unknown_phrases.log")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = [l.rstrip() for l in f if l.strip()]
+    except OSError:
+        lines = []
+    if not lines:
+        jarvis_say("Nothing yet, sir: every sentence so far was understood.")
+        return
+    jarvis_say(f"{len(lines)} sentence(s) I could not handle so far; the last {min(20, len(lines))}:")
+    for l in lines[-20:]:
+        out("    " + safe(l), GRAY)
+    out(f"  (kept in {safe(path)}: send them over and they get taught)", GRAY)
+
+
 def jv_didnt_catch(text):
+    jv_upd_log_miss(re.sub(JV_NAMED_RE, " ", text, flags=re.I))
     t = re.sub(JV_NAMED_RE, " ", text, flags=re.I).strip().lower().rstrip("?!. ")
     if re.match(r"^(?:what|who|why|when|where|how|which|is|are|can|does|do|did|will|would|should|cosa|che|chi|perch|quando|dove|come|quale)\b", t):
         jarvis_say("I can't answer that one offline, sir. I know files, games, your PC, maths, units, dates and a glossary of "
                    "file types and tech terms.")
     else:
         jarvis_say("I'm afraid I didn't catch that, sir.")
-    close = difflib.get_close_matches(t, [x.lower() for x in JV_SUGGEST], n=3, cutoff=0.35) if t else []
+    pool = [x.lower() for x in JV_SUGGEST] + [qu.lower().rstrip("?") for _, qu, _ in JV_FAQ]
+    close = difflib.get_close_matches(t, pool, n=3, cutoff=0.4) if t else []
     if close:
         jarvis_say("Did you mean: " + "  |  ".join(f"'{c}'" for c in close) + "?")
     else:
@@ -4575,6 +4615,12 @@ def jv_interpret_core(texto):
     if sel and os.path.isfile(sel) and re.search(r"\b(?:export|extract key|extract\.key)\b|\b(?:save|make|create|generate|write|give me|get|download)\b.*\b(?:report|summary file)\b", t) \
             and not re.search(r"\.(?:txt|csv|json)\b", t):
         extract_key([])                # 'jarvis export it', 'give me a report of this file'
+        return True
+    if re.fullmatch(r"(?:what (?:did|didnt|do) (?:you|u) (?:not )?(?:understand|miss|catch)|what (?:didnt|did not) you (?:understand|catch)|"
+                    r"(?:show|list|see) (?:the )?(?:unknown|missed|unrecognised|unrecognized|unhandled) (?:phrases|sentences|requests)|"
+                    r"(?:unknown|missed) phrases|misses|what did you miss|what have you missed)", t.replace("'", "")):
+        jv_misses_show()
+        CONTESTO["jv_nostore"] = True
         return True
     if jv_is_maintenance(t):           # "go in maintenance", "test all the commands"...
         jarvis_say("Entering maintenance mode, sir. I'm putting everything else on hold and testing every command.")
@@ -5651,6 +5697,7 @@ def jv_upd_selftest():
     import io
     import tempfile
     snap, old_cwd = dict(CONTESTO), os.getcwd()
+    CONTESTO["jv_nolog"] = True          # the test sentences must not end up in the list of misunderstood phrases
     tmp = tempfile.mkdtemp(prefix="jarvis_selftest_")
     results = []
     tag = {"n": 0}
@@ -5737,6 +5784,54 @@ def jv_upd_selftest():
             print(f"{len(NOMI)} commands, {len(CMDLETS)} names")
         run("every command and alias is registered", registry)
 
+        section("Integrity of the program and of what I know")
+        def dupes():
+            import ast
+            with open(os.path.abspath(__file__), encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            seen, dup = {}, []
+            for top in tree.body:
+                if isinstance(top, (ast.FunctionDef, ast.ClassDef)):
+                    if top.name in seen:
+                        dup.append(top.name)
+                    seen[top.name] = True
+            if dup:
+                raise RuntimeError("defined twice (the second hides the first): " + ", ".join(sorted(set(dup))))
+            print(f"{len(seen)} top-level names, no duplicates")
+        run("no function is defined twice", dupes)
+        def faqself():
+            bad = []
+            for k, qu, a in JV_FAQ:
+                hit = jv_faq_find(qu)
+                if not hit or hit[1][1] != qu:
+                    bad.append(qu)
+                if not a.strip() or len(a) < 40:
+                    bad.append("short answer: " + qu)
+            if bad:
+                raise RuntimeError(f"{len(bad)} entries not found by their own question: {bad[:2]}")
+            print(f"{len(JV_FAQ)} how-to answers, each found by its own question")
+        run("every how-to answer is found by its own question", faqself)
+        def kbsane():
+            keys, dup = {}, []
+            for ks, txt in JV_KB:
+                if len(txt) < 15:
+                    raise RuntimeError(f"too short: {ks}")
+                for k in ks:
+                    if k in keys and keys[k] != txt:
+                        dup.append(k)
+                    keys[k] = txt
+            for pair in JV_COMPARE:
+                if len(pair) != 2:
+                    raise RuntimeError(f"bad comparison {set(pair)}")
+            if dup:
+                raise RuntimeError("same glossary word with two meanings: " + ", ".join(sorted(set(dup))[:8]))
+            print(f"{len(JV_KB)} glossary entries, {len(JV_GAMES_KB)} games, {len(JV_COMPARE)} comparisons")
+        run("glossary, games and comparisons are consistent", kbsane)
+        run("the list of misunderstood phrases can be shown", say("jarvis what didnt you understand"), need=["JARVIS"])
+        def misslog():
+            jv_didnt_catch("this sentence is a test and must not be remembered")
+        run("a misunderstood sentence gets a polite reply and is not logged during tests", misslog, need=["sir"])
+
         section("Standard commands")
         run("Get-Location", cmd("Get-Location"), need=[tmp])
         run("Get-ChildItem", cmd("Get-ChildItem"), need=["a.txt", "data.csv", "sub"])
@@ -5812,7 +5907,7 @@ def jv_upd_selftest():
             ("select sub/data.win", ["Selected"]), ("what game is this", ["2 chunks"]), ("how many sprites", ["0 sprites"]),
             ("list the chunks", ["GEN8", "SPRT"]), ("go up", ["Now in"]), ("read a.txt", ["alpha beta"]),
             ("what is selected", []), ("deselect", []),
-            ("jarvis thats sick", ["sir"]),
+            ("jarvis thats sick", ["sir"]), ("jarvis help me", ["sir"]),
             ("jarvis why does my game crash", ["overheating"]), ("jarvis how do i fix a dll not found error", ["Redistributable"]),
             ("jarvis difference between ssd and hdd", ["moving parts"]), ("jarvis zip vs rar", ["WinRAR"]),
             ("jarvis how can i free disk space", ["Disk Cleanup"]), ("jarvis is it safe to delete temp files", ["Windows recreates"]), ("jarvis ur the best", ["sir"]), ("jarvis whats your name", ["JARVIS"]), ("jarvis lol", ["sir"]),
@@ -6411,6 +6506,10 @@ def esegui(riga):
         return
     nome = token[0]
     fn = CMDLETS.get(nome.lower())
+    if nome.lower() in ("help", "get-help", "man") and re.search(JV_NAMED_RE, riga, re.I):
+        rest = [a for a in token[1:] if not re.fullmatch(JV_NAMED_RE, a, re.I)]
+        if rest and not all(a.startswith("-") or a.lower() in CMDLETS for a in rest) and jarvis_interpret(riga):
+            return                          # 'help me jarvis': a request, not a help topic
     if fn is not None and nome.lower() not in JV_NOT_NAMED_CMDS and re.search(JV_NAMED_RE, riga, re.I):
         if jarvis_interpret(riga):          # 'jarvis' somewhere in the line: Jarvis answers first
             return
