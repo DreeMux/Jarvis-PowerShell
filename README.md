@@ -17,6 +17,15 @@ Find your games, hunt corrupted files, inspect any file and update itself safely
 
 ## What is it?
 
+![Jarvis start screen and menu](docs/screenshot-start.png)
+*The start screen: Jarvis greets you, then you pick Proceed, Install Guard or Delete Guard.*
+
+![Jarvis answering a plain-language request](docs/screenshot-assistant.png)
+*Talk to it in plain language, or type PowerShell-style commands.*
+
+![denux.hunter looking for corrupted files](docs/screenshot-hunter.png)
+*The file tools: hunt for corrupted files and inspect any file.*
+
 **Jarvis PowerShell** is a terminal that behaves like Windows PowerShell (same colours, same cmdlets, same error messages) with an assistant built in. You can type `dir` and `cd` as usual, or just say what you need:
 
 > *"find my games"* · *"scan this PC for corrupt files"* · *"what's in this folder?"* · *"open data.win"*
