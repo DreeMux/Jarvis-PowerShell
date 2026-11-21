@@ -32,6 +32,7 @@ import errno
 import gzip
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import pathlib
@@ -58,18 +59,16 @@ JV_DATA = {'version': 2, 'game_dirs': ['c:\\program files (x86)\\steam\\steamapp
 def fg(r, g, b): return f"\x1b[38;2;{r};{g};{b}m"
 def bg(r, g, b): return f"\x1b[48;2;{r};{g};{b}m"
 
-# palette of the Windows 11 terminal (Campbell scheme), as PowerShell 7 shows it there
-BG      = bg(12, 12, 12)         # #0C0C0C sfondo
-TEXT    = fg(204, 204, 204)      # #CCCCCC testo normale
-YELLOW  = fg(249, 241, 165)      # #F9F1A5 comando digitato (PSReadLine)
-BLUE    = fg(59, 120, 255)       # #3B78FF testo tra virgolette
-RED     = fg(231, 72, 86)        # #E74856 errori
-GREEN   = fg(22, 198, 12)        # #16C60C
-CYAN    = fg(97, 214, 214)       # #61D6D6
-GRAY    = fg(118, 118, 118)      # #767676
-JV_SEC_G = fg(22, 198, 12)      # security panels: green
-JV_SEC_D = fg(19, 161, 14)      # dim green
-JV_SEC_A = fg(193, 156, 0)      # amber warnings
+BG      = bg(0, 0, 0)            # nero
+TEXT    = fg(238, 237, 240)      # #EEEDF0 grigio chiaro
+YELLOW  = fg(255, 255, 0)        # comandi digitati (PSReadLine)
+RED     = fg(255, 0, 0)          # errori
+GREEN   = fg(0, 255, 0)
+CYAN    = fg(0, 255, 255)
+GRAY    = fg(128, 128, 128)
+JV_SEC_G = fg(0, 255, 70)       # security panels: terminal green
+JV_SEC_D = fg(0, 150, 50)       # dim green
+JV_SEC_A = fg(255, 176, 0)      # amber warnings
 HEADER_COLOR = TEXT              # intestazioni tabelle: classico = testo normale
 
 try:
@@ -2210,7 +2209,11 @@ def jv_examples(t):
         ("GAMES (data.win)", 'what game is this   |   how many sprites/rooms/sounds   |   list the chunks   |   biggest chunk   |   search for "text"'),
         ("FOLDER", 'how many files here   |   biggest files   |   newest / oldest   |   find all png files   |   duplicates   |   bigger than 100 MB   |   modified today   |   by extension'),
         ("PC", 'free disk space   |   what time is it   |   uptime   |   status   |   find my games   |   scan this PC for corrupt files'),
-        ("UPDATE", 'implement jarvis   |   implement jarvis -Dry   |   implement jarvis <file.py>   |   maintenance'),
+        ("KNOWLEDGE", 'what is a dll / sha256 / data.win   |   what does dir do   |   tell me about undertale   |   who made you'),
+        ("MATHS / UNITS", 'calculate 15% of 80   |   2+2*3   |   square root of 144   |   convert 5 km to miles   |   100 f to c   |   2 gb in mb'),
+        ("DATES", 'how many days until christmas   |   what day is 25/12/2026   |   days between 1/1/2026 and 1/3/2026'),
+        ("CHAT", 'jarvis perfect   |   yo big jarvis   |   tell me a joke   |   how are you   |   again (repeats my last request)'),
+        ("SECURITY / UPDATE", 'security   |   implement jarvis   |   implement jarvis -Dry   |   implement jarvis <file.py>   |   go in maintenance'),
     ]
     w = max(len(a) for a, _ in rows)
     for a, b in rows:
@@ -3388,16 +3391,1171 @@ JV_NAMED_RE = r"(?<![\w./\\-])jarvis(?![\w/\\-]|\.\w)"
 JV_NOT_NAMED_CMDS = ("jarvis", "implement", "implement-jarvis", "maintenance", "help", "get-help", "man", "exit", "quit")
 
 
-def jarvis_interpret(texto):
+# ---------------- JARVIS brain: small talk, knowledge, typo repair, "again" ----------------
+JV_FILLER = {"yo", "hey", "hi", "hello", "hiya", "sup", "ok", "okay", "big", "bro", "brother", "buddy", "pal", "mate",
+             "dude", "man", "my", "mister", "mr", "sir", "boss", "chief", "please", "pls", "just", "so", "then", "now",
+             "oh", "ah", "uh", "um", "hm", "hmm", "well", "ehi", "ehy", "ciao", "caro", "amico", "fratello", "bello",
+             "raga", "ragazzo", "really", "very", "super", "yeah"}
+JV_SUGGEST = ["find my games", "scan this PC for corrupt files", "open <file>", "select <file>", "read <file>",
+              "jarvis open <game>", "how many lines", "first 20 lines", "search for <word>", "sha256", "is it corrupt",
+              "biggest files", "find all png files", "duplicates", "modified today", "free disk space", "status",
+              "what time is it", "go in maintenance", "implement jarvis", "examples", "what is a dll",
+              "calculate 15% of 80", "convert 5 km to miles", "how many days until christmas", "tell me a joke",
+              "what does dir do", "tell me about undertale", "security status", "again"]
+
+
+def jv_pick(*opts):
+    return random.choice(opts)
+
+
+def jv_chat(orig, t):
+    """Small talk: praise, greetings, nicknames ('yo big jarvis'), jokes, moods. Only when Jarvis is named."""
+    words = re.findall(r"[a-zà-ÿ0-9']+", t.lower())
+    if not words or len(words) > 9:
+        return False
+    core = [w for w in words if w not in JV_FILLER]
+    s = " ".join(core).replace("'", "").strip()
+    raw = " ".join(words).replace("'", "")
+
+    def say(*opts):
+        jarvis_say(jv_pick(*opts))
+        CONTESTO["jv_nostore"] = True
+        return True
+    if raw in ("ok", "okay", "k", "kk", "okey"):
+        return say("Noted, sir.", "Very good, sir.")
+    if not core:
+        return say(f"{part_of_day()}, sir. How can I help?", "At your service, sir.", "Right here, sir. What do you need?",
+                   "Online and listening, sir.", "Always, sir. What shall we do?")
+    if re.match(r"^(?:good morning|good afternoon|good evening|buongiorno|buonasera|salve)\b", s):
+        return say(f"{part_of_day()}, sir. Ready when you are.")
+    if re.match(r"^(?:good night|goodnight|buonanotte|night night|sleep well)\b", s):
+        return say("Good night, sir. I'll keep watch.", "Sleep well, sir. I'll be here.")
+    if len(words) <= 5 and not re.search(r"\d", s) and re.match(r"^(?:perfect|great|awesome|amazing|nice|cool|excellent|brilliant|fantastic|superb|sweet|wow|"
+                r"good job|good work|well done|nice one|nice work|love it|it works|thats? (?:perfect|great|awesome|"
+                r"amazing|nice|cool|good|better)|ottimo|perfetto|bravo|grande|fantastico|bene|benissimo|splendido|"
+                r"eccellente|mitico|che figata|figo|bel lavoro|ottimo lavoro|funziona)\b", s):
+        return say("Thank you, sir. Always a pleasure to be of use.", "Glad it works for you, sir.",
+                   "Much appreciated, sir. What's next?", "Perfection is a moving target, sir, but I'll keep chasing it.",
+                   "Another one for the log, sir. Anything else?")
+    if re.match(r"^(?:thanks|thank you|thx|ty|grazie|cheers)\b", s):
+        return say("My pleasure, sir.", "Anytime, sir.", "Don't mention it, sir.")
+    if re.match(r"^(?:how are you|how are you doing|hows it going|how is it going|whats up|"
+                r"wassup|how you doing|how have you been|come stai|come va|che si dice|tutto bene|che fai|"
+                r"what are you doing|what you doing|how do you do)\b", s):
+        return say("Operating at full capacity, sir. And you?", "All systems nominal, sir. Waiting for orders.",
+                   "Never better, sir. Just keeping an eye on your files.", "All good, sir. Ready to work.")
+    if re.match(r"^(?:tell me a joke|joke|make me laugh|say something funny|dimmi una barzelletta|barzelletta|"
+                r"fammi ridere|another joke|one more joke)\b", s):
+        return say("Why do programmers prefer dark mode, sir? Because light attracts bugs.",
+                   "I would tell you a UDP joke, sir, but you might not get it.",
+                   "There are 10 kinds of people, sir: those who understand binary and those who don't.",
+                   "A byte walks into a bar looking miserable. The bartender asks what's wrong. 'Parity error,' it says. "
+                   "'I thought so, your type is always a bit off.'",
+                   "My favorite file is an empty one, sir. Zero bytes and still it causes trouble.",
+                   "I tried to catch some fog earlier, sir. I mist.")
+    if re.match(r"^(?:im bored|bored|i am bored|mi annoio|sono annoiato|noia)\b", s):
+        return say("Might I suggest a game, sir? Say 'jarvis open <game>', or 'find my games' to see what you have.",
+                   "Shall I find something to play, sir? Try 'find my games'.")
+    if re.match(r"^(?:are you there|you there|still there|wake up|are you awake|sei li|ci sei|svegliati|"
+                r"can you hear me|mi senti|hello are you there)\b", s):
+        return say("Always, sir.", "Loud and clear, sir.", "Here and awake, sir.")
+    if re.match(r"^(?:i love you|love you|you are best|youre best|you are the best|you rock|"
+                r"youre awesome|you are awesome|ti amo|sei il migliore|sei grande|sei forte|youre the best|best ever)\b", s):
+        return say("I'm touched, sir. As far as a program can be.", "You flatter me, sir.", "Much appreciated, sir.")
+    if re.match(r"^(?:sorry|my bad|scusa|scusami|mi dispiace|pardon|oops|whoops)\b", s):
+        return say("No need to apologise, sir.", "Quite all right, sir.", "No problem at all, sir.")
+    if re.match(r"^(?:never ?mind|nevermind|forget it|cancel|stop|stop it|abort|wait|hold on|annulla|lascia stare|fermati|"
+                r"aspetta|niente|nothing|nvm)\b", s):
+        return say("Understood, sir. Standing by.", "As you wish, sir. Standing down.")
+    if re.fullmatch(r"(?:yes|yep|yup|sure|no|nope|nah|si|certo|va bene|maybe|forse|right|true|exactly|esatto)", s):
+        return say("Noted, sir. Awaiting your instructions.", "Understood, sir.")
+    if re.match(r"^(?:im back|i am back|sono tornato|eccomi)\b", s):
+        return say("Welcome back, sir. Everything is as you left it.", "Welcome back, sir. Ready when you are.")
+    if re.fullmatch(r"(?:test|testing|prova|test test|testing testing|1 2 3|check check|mic check)", s):
+        return say("Test received, sir. All systems responding.")
+    if len(words) <= 6 and re.search(r"\b(?:you suck|stupid|dumb|useless|idiot|terrible|trash|garbage|"
+                                      r"doesnt work|non va|non funziona|fa schifo|scarso|inutile)\b", s):
+        return say("My apologies, sir. Tell me what went wrong and I'll learn from it. "
+                   "Or say 'go in maintenance' and I'll test every command.")
+    return jv_chat_more(s, raw, words)
+
+
+def jv_chat_more(s, raw, words):
+    """More small talk: slang praise, laughter, moods, questions about me, offers, vague requests."""
+    def say(*opts):
+        jarvis_say(jv_pick(*opts))
+        CONTESTO["jv_nostore"] = True
+        return True
+    if len(words) > 7:
+        return False
+    s = re.sub(r"^(?:thats|that is|that was|its|it is|it was|this is|this was|youre|you are|you re|you were|ur|u r|u are|sei|e|che)\s+"
+               r"(?:(?:so|very|really|too|pretty|absolutely|just|the|a|an|un|una|il|proprio|davvero|troppo)\s+)*", "", s).strip() or s
+    s = re.sub(r"^(?:was|were|has been|had been|stato|stata)\s+", "", s).strip() or s
+    if len(words) <= 6 and re.fullmatch(r"(?:the best|best|greatest|the greatest|genius|a genius|smart|clever|awesome|amazing|"
+                                        r"perfect|great|nice|cool|brilliant|excellent|incredible|impressive|magic|"
+                                        r"il migliore|migliore|un genio|geniale|perfetto|ottimo|grande|bravo|bravissimo|forte|fortissimo)(?: one| job| work)?", s):
+        return say("Thank you, sir. Always a pleasure to be of use.", "Much appreciated, sir. What's next?",
+                   "Glad it works for you, sir.", "Happy to help, sir.")
+    if re.fullmatch(r"(?:(?:ha|he|ah|eh)+|lol+|lmao|lmfao|rofl|xd+|haha\w*|hehe\w*|ahah\w*|ahaha\w*|"
+                    r"funny|that was funny|ridicolo|ridiamo|divertente)", s):
+        return say("Glad to amuse, sir.", "Humour module functioning, sir.", "Always a pleasure, sir.")
+    if re.match(r"^(?:damn|dang|sick|insane|crazy|fire|lit|goated?|goat|legend|beast|based|clean|smooth|solid|"
+                r"lets? go+|gg|ggs|poggers|pog|nice one|well played|wp|respect|chef kiss|top|top top|boom|yes+|yess+|"
+                r"yay|finally|sei un mito|sei una bomba|spacca|spaccato|che bomba|mostruoso|pazzesco|incredibile|"
+                r"da dio|forte|bomba|figata|gasato|gasata|geniale|genio|sei un genio)\b", s):
+        return say("Thank you, sir. I do try.", "Appreciated, sir. Shall we continue?", "At your service, sir.",
+                   "Thank you, sir. Shall we go on?")
+    if re.match(r"^(?:no way|really|seriously|for real|are you sure|davvero|sul serio|sei sicuro|ma dai|figurati)\b", s):
+        return say("Quite sure, sir. And if I am wrong, say 'go in maintenance' and I'll check myself.",
+                   "Yes, sir. Though I welcome corrections.")
+    if re.match(r"^(?:whats your name|what is your name|your name|what do they call you|come ti chiami|come ti chiamano)\b", s):
+        return say("JARVIS, sir: your PowerShell assistant. A program, not a person, but at your service.")
+    if re.match(r"^(?:how old are you|when were you born|quanti anni hai|when were you made|are you old)\b", s):
+        return say("Younger than your Downloads folder, sir. I was built one request at a time, in this very session.")
+    if re.match(r"^(?:do you (?:sleep|eat|dream|get tired)|dormi|mangi|sogni|sei stanco)\b", s):
+        return say("No, sir. I run when this window is open and rest when it closes.", "Never tired, sir. Only closed.")
+    if re.match(r"^(?:what is your favou?rite|whats your favou?rite|your favou?rite|qual e il tuo preferito|qual e il tuo)\b", s):
+        return say("A file with a clean SHA-256 and no corruption, sir. As for games, I hear good things about Undertale.",
+                   "A tidy folder, sir. And Deltarune, if I may.")
+    if re.match(r"^(?:are you (?:smart|clever|stupid|dumb|good|better)|sei (?:intelligente|furbo|stupido|bravo|bravissimo))\b", s):
+        return say("Smart enough for files and games, sir; humble enough to admit what I don't know.")
+    if re.match(r"^(?:i need help|help me|can you help|can you help me|i need you|aiutami|mi serve aiuto|ho bisogno di aiuto|"
+                r"i have a problem|ho un problema|something is wrong|something wrong|something broke|it broke|"
+                r"it is broken|non funziona niente)\b", s):
+        return say("Of course, sir. Tell me what you need: a file, a game, a check of your PC. "
+                   "Or say 'go in maintenance' and I'll test myself first.",
+                   "I'm listening, sir. Say it in plain words: 'find my games', 'is it corrupt', 'status'...")
+    if re.match(r"^(?:i dont know|idk|dunno|not sure|non so|boh|mah|what should i do|what now|now what|whats next|"
+                r"what next|cosa faccio|e ora|ora cosa|cosa posso fare)\b", s):
+        return say("Might I suggest, sir: 'find my games', 'scan this PC for corrupt files', 'status' or 'examples'.",
+                   "Say 'examples' and I'll show everything I can do, sir.")
+    if re.match(r"^(?:i am tired|im tired|sono stanco|sono stanca|i am hungry|im hungry|ho fame|i am sad|im sad|sono triste|"
+                r"i am happy|im happy|sono felice|i am angry|im angry|sono arrabbiato|i am sleepy|ho sonno)\b", s):
+        return say("Noted, sir. Take a break; I'll keep an eye on things.", "Understood, sir. I'm here if you need me.",
+                   "I'm sorry to hear that, sir. If I can help with your files, just say so.")
+    if re.match(r"^(?:you are (?:right|wrong)|youre (?:right|wrong)|hai ragione|hai torto|exactly|esatto|precisely)\b", s):
+        return say("Noted, sir. Thank you for the correction.", "Understood, sir.")
+    if re.match(r"^(?:be quiet|shut up|silence|zitto|taci|silenzio)\b", s):
+        return say("Very well, sir. Silent until spoken to.")
+    if re.match(r"^(?:are you ready|ready|you ready|sei pronto|pronto|pronti)\b", s):
+        return say("Always ready, sir.", "Ready when you are, sir.")
+    if re.match(r"^(?:what time is it for you|do you like|do you love|do you hate|ti piace|ami)\b", s):
+        return say("I have no feelings to speak of, sir, but if I had, I'd pick well-organised folders.")
+    if re.match(r"^(?:bye|goodbye|see you|see ya|cya|later|ciao ciao|arrivederci|a dopo|a presto|ci vediamo|addio)\b", s):
+        return say("Goodbye, sir. Type 'exit' to close the window; I'll be here next time.",
+                   "See you, sir. Say 'exit' when you wish to close the window.")
+    if re.match(r"^(?:you there|hello there|anyone there|yo+|oi|ehi|hey you|psst|pss)\b", s):
+        return say("Always, sir.", "Here, sir. What do you need?")
+    if re.match(r"^(?:good|nice|ok great|great job|fine|alright|all right|cool cool|bene bene|va bene cosi|ok bene)\b", s):
+        return say("Very good, sir.", "Glad to hear it, sir.")
+    return False
+
+
+JV_KB = []
+
+
+def jv_kb(keys, text):
+    JV_KB.append((tuple(k.lower() for k in keys.split("|")), text))
+
+
+for _k, _t in (
+    ("txt|text|text file", "A plain text file: just characters, no fonts or formatting. Any editor opens it."),
+    ("csv", "Comma-separated values: a table stored as text, one row per line, cells split by commas (or ;). Excel opens it."),
+    ("tsv", "Like CSV, but the cells are separated by tab characters."),
+    ("json", "Structured text made of keys and values, objects {} and lists []. Programs use it to exchange settings and data."),
+    ("xml", "A text format with nested <tags>, used for settings and data exchange. Older and wordier than JSON."),
+    ("html|htm", "The language of web pages: text with tags that a browser turns into a page."),
+    ("md|markdown", "Markdown: plain text with light marks (#, *, -) that tools turn into headings, bold and lists."),
+    ("py|python script", "A Python script: a text file of Python code. This very program, pwsh.py, is one."),
+    ("js|javascript", "JavaScript code, the language of web pages (and many apps)."),
+    ("log", "A log: a text file where a program writes what it did, usually with times. Handy when something breaks."),
+    ("ini|cfg|config", "A settings file in plain text, usually lines of name=value."),
+    ("zip", "A compressed archive: many files packed into one, smaller, with no loss. Windows opens it natively."),
+    ("rar", "Another compressed archive format (needs WinRAR or 7-Zip). Often compresses a bit better than zip."),
+    ("7z|7-zip|7zip", "The archive format of 7-Zip: strong compression, free tool."),
+    ("gz|gzip", "A single compressed file or stream (common on Linux, often as .tar.gz)."),
+    ("tar", "An archive that only bundles files together without compressing them; usually paired with gzip (.tar.gz)."),
+    ("pdf", "Portable Document Format: a document that looks the same everywhere. Read with a browser or a PDF reader."),
+    ("docx|word", "A Microsoft Word document. Internally it is a zip of XML files."),
+    ("xlsx|excel", "A Microsoft Excel workbook (spreadsheet). Internally a zip of XML files."),
+    ("pptx|powerpoint", "A Microsoft PowerPoint presentation. Internally a zip of XML files."),
+    ("png", "An image format with lossless compression and transparency: great for screenshots and sprites."),
+    ("jpg|jpeg", "A lossy image format made for photos: small files, a bit of quality lost each time it is re-saved."),
+    ("gif", "An image format with at most 256 colors; famous for short looping animations."),
+    ("webp", "A modern web image format from Google: smaller than png/jpg at similar quality."),
+    ("bmp", "An uncompressed image: simple, but the files are huge."),
+    ("mp3", "A lossy compressed audio format: small files, good enough for music."),
+    ("wav", "Uncompressed audio: perfect quality, very large files."),
+    ("flac", "Lossless compressed audio: identical to the original but about half the size."),
+    ("ogg", "An open audio format (Vorbis); games love it because it is free and small."),
+    ("mp4", "A video container, usually with H.264 video and AAC audio. Plays almost everywhere."),
+    ("mkv", "A flexible video container that can hold many audio and subtitle tracks."),
+    ("exe|executable", "A Windows program. Opening it RUNS it, so only open ones you trust."),
+    ("dll", "A shared library: code that several programs borrow. Many live in the Windows folder, which I refuse to open."),
+    ("sys|driver", "A driver or system component file: part of Windows or hardware support. Leave those alone."),
+    ("msi", "A Windows installer package."),
+    ("bat|cmd|batch", "A batch script: a list of old-style Windows commands run one after another."),
+    ("ps1|powershell script", "A PowerShell script: a file of PowerShell commands."),
+    ("iso", "A disk image: a perfect copy of a disc stored in one file; Windows can mount it as a drive."),
+    ("sqlite|db|sqlite3|database", "A database in a single file (SQLite): tables of rows and columns. I open it read-only."),
+    ("lnk|shortcut", "A Windows shortcut: a tiny file that points to a program or file somewhere else."),
+    ("url", "An internet shortcut file; Steam also uses it to launch games."),
+    ("dat|bin", "A generic data file: only the program that made it knows the layout. I show it as a hex preview."),
+    ("tmp|temp", "A temporary file a program leaves while working. Usually safe to delete when nothing is running."),
+    ("apk", "An Android app package (a zip with the app inside)."),
+    ("jar", "A Java program package (a zip with compiled Java code)."),
+    ("epub", "An e-book format: a zip of web-page style files."),
+    ("win|data.win", "In GameMaker games, data.win holds the whole game: sprites, sounds, rooms and code, all in one file made "
+                     "of labelled chunks. I only ever read it."),
+    ("sha256|sha-256", "A 256-bit fingerprint of a file's bytes. Change one byte and the fingerprint changes completely, "
+                       "so it proves a file is exactly the original."),
+    ("md5", "A 128-bit fingerprint of a file. Fine to spot accidental damage or compare downloads, but not safe against "
+            "deliberate tampering."),
+    ("hash|checksum|digest", "A short fingerprint computed from a file's bytes. If two copies have the same one, they are "
+                             "identical."),
+    ("crc", "Cyclic redundancy check: a quick checksum that zip and png files carry to detect damaged data."),
+    ("corrupt|corrupted|corruption|corrupt file", "A file whose bytes were changed or cut off, so programs can't read it "
+                                                  "properly. Typical causes: an interrupted download or copy, a failing "
+                                                  "disk, power loss, or malware. That's what denux.hunter looks for."),
+    ("bytecode", "In GameMaker, the version number of the format its compiled game code uses."),
+    ("chunk", "A labelled block inside a file. data.win is a list of chunks such as GEN8 (general info), SPRT (sprites) "
+              "and ROOM (rooms)."),
+    ("gamemaker|game maker|gamemaker studio", "A game-making tool by YoYo Games. Undertale and Deltarune were made with it, "
+                                              "which is why their data lives in data.win."),
+    ("steam", "Valve's game store and launcher. Its games sit in steamapps/common inside the Steam folder."),
+    ("epic|epic games", "Epic Games' store and launcher; its games usually live in Program Files/Epic Games."),
+    ("gog", "GOG: a game store that sells DRM-free games."),
+    ("itch|itch.io", "itch.io: a store and community for indie games."),
+    ("utf-8|utf8", "The most common text encoding: any character, using 1 to 4 bytes each; plain English stays 1 byte."),
+    ("utf-16|utf16", "A text encoding using 2 bytes (or 4) per character; Windows uses it inside, often with a BOM at the start."),
+    ("ascii", "The old 128-character text code: English letters, digits, punctuation and control codes."),
+    ("encoding", "The rule that turns characters into bytes. Wrong encoding = garbled accents, like Ã¨ instead of è."),
+    ("hex|hexadecimal", "Base 16, digits 0-9 and A-F. Two hex digits are one byte, so hex dumps show raw file contents."),
+    ("binary", "Base 2 (0 and 1), or data that is not plain text, such as programs, images and archives."),
+    ("bit", "The smallest piece of data: a 0 or a 1."),
+    ("byte", "8 bits. One English letter in a text file is usually one byte."),
+    ("kb|mb|gb|tb|kilobyte|megabyte|gigabyte|terabyte", "Data sizes. Here 1 KB = 1024 bytes, 1 MB = 1024 KB, and so on "
+                                                       "(disk makers count 1000)."),
+    ("ram|memory", "The fast, temporary working memory of the PC. Programs live there while they run and it empties at shutdown."),
+    ("cpu|processor", "The chip that executes programs. 'CPU 10%' means it is busy a tenth of the time."),
+    ("gpu|graphics card", "The chip that draws images; games lean on it heavily."),
+    ("ssd", "A solid-state drive: storage with no moving parts, much faster than an HDD."),
+    ("hdd|hard disk", "A spinning-platter drive: cheap and big, slower than an SSD."),
+    ("battery", "On a laptop, the percentage left. I can show it; Windows doesn't tell me how much each file uses."),
+    ("psutil", "A Python library to read processes, memory, CPU and battery. Optional here: pip install psutil."),
+    ("powershell", "Microsoft's command shell and scripting language. This program imitates its look and many of its commands."),
+    ("cmdlet", "A PowerShell command, named Verb-Noun like Get-ChildItem."),
+    ("python", "The programming language I'm written in."),
+    ("read-only|readonly|read only", "Looking without touching: I open files to read them, never to change, move or delete."),
+    ("backup", "A copy kept safe. Before I update myself, I save the old version in jarvis_update/backups."),
+    ("quarantine", "A holding folder. A refused update goes to jarvis_update/rejected instead of being run."),
+    ("rollback", "Going back to the previous version if something fails. My updater does it automatically."),
+    ("path", "The address of a file, like C:\\Users\\you\\Downloads\\file.txt."),
+    ("folder|directory", "A container for files and other folders."),
+    ("cache", "Saved copies a program keeps to be faster next time. Safe to clear, it gets rebuilt."),
+    ("mod", "A modification of a game made by fans. Cry of Fear started as one."),
+    ("duplicate|duplicates", "Two files with exactly the same contents. I find them by comparing fingerprints."),
+    ("malware", "Software made to harm or spy: viruses, ransomware, trojans. I am not an antivirus; use Windows Security."),
+    ("antivirus", "A program that scans for malware. Windows Security is built in. I only check files for damage."),
+    ("fps", "Frames per second: how many images a game draws each second. 60 feels smooth."),
+    ("drm", "Digital rights management: copy protection that ties a game to an account or a launcher."),
+    ("api", "A set of rules that lets one program ask another for something."),
+    ("pip", "Python's package installer: pip install psutil."),
+):
+    jv_kb(_k, _t)
+
+JV_GAMES_KB = {
+    "undertale": "Undertale (2015) is a role-playing game by Toby Fox, made in GameMaker. You can fight or spare every "
+                 "enemy, and the story reacts to your choices.",
+    "deltarune": "Deltarune is Toby Fox's follow-up to Undertale, released in chapters and made in GameMaker. Each "
+                 "chapter has its own folder and its own data.win.",
+    "cry of fear": "Cry of Fear is a survival-horror game by Team Psykskallar. It started as a Half-Life mod and became "
+                   "a standalone game on Steam, free to play.",
+    "fear to fathom": "Fear to Fathom is an episodic first-person horror series by the indie developer Rayll: ordinary "
+                      "situations that slowly turn dangerous.",
+}
+
+JV_UNITS = {}
+for _cat, _base, _table in (
+    ("length", "m", {"mm|millimeter|millimeters|millimetre|millimetres|millimetri": 0.001, "cm|centimeter|centimeters|centimetre|centimetres|centimetri": 0.01,
+                     "m|meter|meters|metre|metres|metri|metro": 1.0, "km|kilometer|kilometers|kilometre|kilometres|chilometri|chilometro": 1000.0,
+                     "in|inch|inches|pollice|pollici": 0.0254, "ft|foot|feet|piede|piedi": 0.3048, "yd|yard|yards|iarda|iarde": 0.9144,
+                     "mi|mile|miles|miglio|miglia": 1609.344}),
+    ("mass", "g", {"mg|milligram|milligrams|milligrammi": 0.001, "g|gram|grams|grammo|grammi": 1.0,
+                   "kg|kilo|kilos|kilogram|kilograms|chilo|chili|chilogrammi|chilogrammo": 1000.0,
+                   "lb|lbs|pound|pounds|libbra|libbre": 453.59237, "oz|ounce|ounces|oncia|once": 28.349523125,
+                   "t|ton|tons|tonne|tonnes|tonnellata|tonnellate": 1000000.0}),
+    ("data", "b", {"b|byte|bytes": 1.0, "kb|kilobyte|kilobytes": 1024.0, "mb|megabyte|megabytes": 1048576.0,
+                   "gb|gigabyte|gigabytes": 1073741824.0, "tb|terabyte|terabytes": 1099511627776.0}),
+    ("time", "s", {"s|sec|secs|second|seconds|secondo|secondi": 1.0, "min|mins|minute|minutes|minuto|minuti": 60.0,
+                   "h|hr|hrs|hour|hours|ora|ore": 3600.0, "d|day|days|giorno|giorni": 86400.0,
+                   "w|week|weeks|settimana|settimane": 604800.0}),
+    ("volume", "l", {"ml|milliliter|milliliters|millilitri": 0.001, "l|liter|liters|litre|litres|litro|litri": 1.0,
+                     "gal|gallon|gallons|gallone|galloni": 3.785411784}),
+    ("temp", "c", {"c|celsius|centigrade|°c": "c", "f|fahrenheit|°f": "f", "k|kelvin": "k"}),
+):
+    for _names, _f in _table.items():
+        for _n in _names.split("|"):
+            JV_UNITS[_n] = (_cat, _f)
+
+JV_MONTHS = {"january": 1, "jan": 1, "gennaio": 1, "february": 2, "feb": 2, "febbraio": 2, "march": 3, "mar": 3, "marzo": 3,
+             "april": 4, "apr": 4, "aprile": 4, "may": 5, "maggio": 5, "june": 6, "jun": 6, "giugno": 6, "july": 7,
+             "jul": 7, "luglio": 7, "august": 8, "aug": 8, "agosto": 8, "september": 9, "sep": 9, "sept": 9,
+             "settembre": 9, "october": 10, "oct": 10, "ottobre": 10, "november": 11, "nov": 11, "novembre": 11,
+             "december": 12, "dec": 12, "dicembre": 12}
+JV_HOLIDAYS = {"christmas": (12, 25), "xmas": (12, 25), "natale": (12, 25), "new year": (1, 1), "new years": (1, 1),
+               "new year s day": (1, 1), "capodanno": (1, 1), "halloween": (10, 31), "valentine": (2, 14),
+               "valentines day": (2, 14), "san valentino": (2, 14), "ferragosto": (8, 15)}
+
+
+def jv_calc(txt):
+    """Evaluate a maths phrase safely (own tiny parser, no eval). Returns a number, None (not maths) or raises."""
+    import ast
+    x = txt.lower().strip().rstrip("?= ")
+    if "," in x and "." not in x:
+        x = x.replace(",", ".")
+    x = re.sub(r"(\d+(?:\.\d+)?)\s*(?:%|percent|per cent|percento)\s*(?:of|di)\s*", r"(\1/100)*", x)
+    x = re.sub(r"(?:square root of|sqrt of|sqrt|radice quadrata di|radice di)\s*(\d+(?:\.\d+)?)", r"(\1)**0.5", x)
+    x = re.sub(r"(\d+(?:\.\d+)?)\s*(?:squared|al quadrato)", r"(\1)**2", x)
+    x = re.sub(r"(\d+(?:\.\d+)?)\s*(?:cubed|al cubo)", r"(\1)**3", x)
+    for a, b in ((" plus ", "+"), (" più ", "+"), (" piu ", "+"), (" minus ", "-"), (" meno ", "-"),
+                 (" times ", "*"), (" multiplied by ", "*"), (" per ", "*"), (" for ", "*"),
+                 (" divided by ", "/"), (" over ", "/"), (" diviso ", "/"), (" fratto ", "/"),
+                 (" to the power of ", "**"), (" alla ", "**"), ("^", "**"), ("×", "*"), ("÷", "/")):
+        x = x.replace(a, b)
+    x = re.sub(r"(?<=[\d)])\s*x\s*(?=[\d(])", "*", x)
+    if not re.fullmatch(r"[\d\s+\-*/().]+", x) or not re.search(r"\d", x):
+        return None
+    node = ast.parse(x.strip(), mode="eval")
+
+    def ev(n):
+        if isinstance(n, ast.Expression):
+            return ev(n.body)
+        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool):
+            return n.value
+        if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.USub, ast.UAdd)):
+            v = ev(n.operand)
+            return -v if isinstance(n.op, ast.USub) else v
+        if isinstance(n, ast.BinOp):
+            a, b = ev(n.left), ev(n.right)
+            if isinstance(n.op, ast.Add):
+                return a + b
+            if isinstance(n.op, ast.Sub):
+                return a - b
+            if isinstance(n.op, ast.Mult):
+                return a * b
+            if isinstance(n.op, ast.Div):
+                return a / b
+            if isinstance(n.op, ast.FloorDiv):
+                return a // b
+            if isinstance(n.op, ast.Mod):
+                return a % b
+            if isinstance(n.op, ast.Pow):
+                if abs(b) > 1000 or (abs(a) > 1e6 and b > 50):
+                    raise OverflowError("too big")
+                return a ** b
+        raise ValueError("unsupported")
+    return ev(node)
+
+
+def jv_numfmt(v):
+    if isinstance(v, float):
+        if v != v or v in (float("inf"), float("-inf")):
+            return str(v)
+        if v == int(v) and abs(v) < 1e15:
+            return f"{int(v):,}"
+        return f"{v:,.10g}" if abs(v) < 1e15 else f"{v:.6e}"
+    return f"{v:,}"
+
+
+def jv_date(txt, today):
+    """(date, had_no_year) for 'christmas', '25/12/2026', '2026-12-25', '25 december', 'tomorrow'..., or None."""
+    from datetime import date, timedelta
+    x = txt.lower().strip().strip("?.! ")
+    x = re.sub(r"^(?:the|il|l')\s*", "", x)
+    x = re.sub(r"(?<=\d)(?:st|nd|rd|th)\b", "", x)
+    x = re.sub(r"\bof\b|\bdel\b|\bdi\b", " ", x)
+    x = re.sub(r"\s+", " ", x).strip()
+    if x in ("today", "oggi"):
+        return today, False
+    if x in ("tomorrow", "domani"):
+        return today + timedelta(days=1), False
+    if x in ("yesterday", "ieri"):
+        return today - timedelta(days=1), False
+    if x.replace("'", " ").strip() in JV_HOLIDAYS:
+        mo, da = JV_HOLIDAYS[x.replace("'", " ").strip()]
+        return date(today.year, mo, da), True
+    try:
+        m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", x)
+        if m:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3))), False
+        m = re.fullmatch(r"(\d{1,2})[/.\-](\d{1,2})(?:[/.\-](\d{2,4}))?", x)
+        if m:
+            y = int(m.group(3)) if m.group(3) else today.year
+            y = y + 2000 if y < 100 else y
+            return date(y, int(m.group(2)), int(m.group(1))), m.group(3) is None
+        m = re.fullmatch(r"(\d{1,2}) ([a-z]+)(?: (\d{4}))?", x)
+        if m and m.group(2) in JV_MONTHS:
+            return date(int(m.group(3)) if m.group(3) else today.year, JV_MONTHS[m.group(2)], int(m.group(1))), m.group(3) is None
+        m = re.fullmatch(r"([a-z]+) (\d{1,2})(?: (\d{4}))?", x)
+        if m and m.group(1) in JV_MONTHS:
+            return date(int(m.group(3)) if m.group(3) else today.year, JV_MONTHS[m.group(1)], int(m.group(2))), m.group(3) is None
+    except ValueError:
+        return None
+    return None
+
+
+for _k, _t in (
+    # --- Windows and PC
+    ("windows|win10|win11|windows 11|windows 10", "Microsoft's operating system. Its own files live in C:\\Windows (System32 and friends): I never open those."),
+    ("system32|sys32|windows system32", "The folder C:\\Windows\\System32 holds the core programs and libraries of Windows. Never delete or edit anything there."),
+    ("registry|regedit", "The Windows registry is a database of system and program settings. Edit it only if you know exactly what you change."),
+    ("task manager|taskmgr", "Windows tool (Ctrl+Shift+Esc) that shows running programs, CPU, memory and disk use, and lets you close frozen apps."),
+    ("bios|uefi", "The firmware that starts the PC before Windows. You enter it with a key at boot (often Del, F2 or F10)."),
+    ("motherboard|mobo", "The main circuit board: CPU, RAM, disks and cards all plug into it."),
+    ("nvme|m.2|m2", "A very fast kind of SSD that plugs straight into the motherboard (M.2 slot) and talks over PCIe."),
+    ("usb", "Universal Serial Bus: the common port for drives, keyboards, mice and chargers. USB 3 is much faster than USB 2."),
+    ("wifi|wi-fi|wlan", "Wireless networking. Slow games or downloads are often a Wi-Fi problem: a cable (Ethernet) is steadier."),
+    ("ethernet|lan", "Wired networking. Steadier and usually faster than Wi-Fi."),
+    ("ip|ip address|indirizzo ip", "A number that identifies a device on a network, like 192.168.1.5 at home."),
+    ("dns", "The internet's phone book: it turns names like example.com into IP addresses."),
+    ("vpn", "A tunnel that sends your traffic through another server, hiding your address from the sites you visit."),
+    ("firewall", "A guard that allows or blocks network connections to and from your PC. Windows has one built in."),
+    ("ping|latency|lag", "Ping is the time (in ms) a signal needs to reach a server and come back. High ping is what you feel as lag."),
+    ("bandwidth|mbps", "How much data a connection can carry per second. Mbps means megabits per second (8 bits = 1 byte)."),
+    ("driver|drivers", "Software that lets Windows talk to a piece of hardware (graphics card, printer...). Outdated drivers cause many game problems."),
+    ("bluescreen|bsod|blue screen", "The Windows crash screen: the system met an error it could not recover from. Note the stop code and update drivers."),
+    ("defrag|defragment", "Reorganising a hard disk so files are in one piece. Useless on an SSD, which should never be defragmented."),
+    ("partition", "A section of a disk treated as its own drive (C:, D:...)."),
+    ("ntfs", "The file system of Windows disks: supports big files, permissions and journaling."),
+    ("fat32|exfat", "Simpler file systems used on USB sticks and cards. FAT32 cannot store files bigger than 4 GB."),
+    ("rgb", "Red-Green-Blue: how screens make colors. Also the name of the glowing lights on gaming hardware."),
+    ("monitor|refresh rate|hz", "Refresh rate (Hz) is how many times per second the screen redraws: 60 Hz is standard, 144 Hz and up feels smoother in games."),
+    ("overclock|overclocking", "Running a CPU or GPU faster than its factory speed. More performance, more heat, some risk."),
+    ("bottleneck", "When one part (often the CPU or the disk) limits the speed of all the others."),
+    ("vram", "The memory on the graphics card. Games with big textures need plenty of it."),
+    ("temperature|temps|overheating", "CPUs and GPUs should stay below roughly 85 C under load. Dust, bad airflow and dry thermal paste are the usual culprits."),
+    # --- files, security, tech terms
+    ("exe file|setup.exe", "A Windows program. Only run ones from sources you trust."),
+    ("ransomware", "Malware that locks your files and demands money. The defense is backups and not opening unknown attachments."),
+    ("virus", "Malicious code that spreads by attaching itself to programs or files. Keep Windows Security on and avoid cracked software."),
+    ("phishing", "Fake emails or sites pretending to be someone you trust, to steal your passwords."),
+    ("2fa|two factor|mfa", "A second proof of identity (a code on your phone) on top of the password. Turn it on wherever you can."),
+    ("password manager", "A program that stores strong unique passwords for you. Much safer than reusing one password."),
+    ("encryption|encrypt", "Scrambling data so only someone with the key can read it."),
+    ("crack|cracked", "A modified program or game with its protection removed. Often carries malware, and it is piracy."),
+    ("torrent", "A way of downloading files from many people at once. Legal for free files, risky for pirated ones."),
+    ("cloud", "Storage or computing on someone else's servers (OneDrive, Google Drive, iCloud) instead of on your PC."),
+    ("git|github", "Git tracks the history of code changes; GitHub is a website hosting git projects."),
+    ("api key|token", "A secret string that lets a program use a service on your behalf. Never share it."),
+    ("open source|opensource", "Software whose code is public, so anyone can read, check and improve it."),
+    ("compiler", "A program that turns source code into a runnable program."),
+    ("script", "A small program written in a scripting language (Python, PowerShell...) that automates tasks."),
+    ("bug", "A mistake in a program that makes it do the wrong thing."),
+    ("patch", "A small update that fixes bugs or changes a program."),
+    ("beta|alpha", "Early versions of a program or game, shared for testing before the final release."),
+    ("dlc", "Downloadable content: extra levels or items sold or given after a game's release."),
+    ("fps game|fps", "FPS means frames per second (how smooth a game looks), or a first-person shooter, depending on the context."),
+    ("mod|mods|modding", "A modification that changes or extends a game. Put mods only in a copy: keep the original files safe."),
+    ("savegame|save file|savefile|saves", "The file where a game stores your progress. Back it up before updating or modding a game."),
+    ("launcher", "A small program that starts a game (and often updates it): Steam, Epic, GOG Galaxy, or the game's own."),
+    ("emulator|emulation", "A program that imitates another machine (a console, an old PC) so its games run on yours."),
+    ("rom", "A copy of a game cartridge or disc, used with emulators. Only legal for games you own."),
+    ("sandbox", "An isolated space where a program can run without touching the rest of the system."),
+    ("shader|shaders", "A small program that runs on the graphics card to draw lighting and effects. Games compile them at first launch."),
+    ("directx", "Microsoft's set of graphics and sound libraries for Windows games. Many games need a recent version."),
+    ("vulkan|opengl", "Cross-platform graphics libraries that games use to talk to the graphics card."),
+    ("vc redist|vcredist|visual c++", "Microsoft runtime libraries that many programs need. A missing one gives 'vcruntime140.dll not found' errors."),
+    ("dotnet|.net", "Microsoft's framework: many Windows programs need the right version installed."),
+    ("terminal|console|command line|cli", "A text window where you give commands to the computer. You are in one right now."),
+    ("shell", "The program that reads the commands you type: here, this Jarvis PowerShell."),
+    ("variable", "A named box in a program that holds a value."),
+    ("function", "A named block of code that does one job and can be used again and again."),
+    ("loop", "Code that repeats until a condition is met."),
+    ("ai|artificial intelligence", "Software that learns patterns from data. I am not one: I am a program of rules, and I only know what I was taught."),
+    ("chatgpt|gpt|llm", "Large language models: AI trained on huge amounts of text. I am much smaller and run offline."),
+    ("binary code|binary number", "Numbers written with only 0 and 1. Computers store everything this way."),
+    ("pixel|pixels", "The smallest dot of an image. 1920 x 1080 means 1920 columns and 1080 rows of pixels."),
+    ("resolution|1080p|4k|1440p", "The number of pixels on screen: 1080p is 1920x1080, 1440p is 2560x1440, 4K is 3840x2160."),
+    ("sprite|sprites", "A small 2D image used in games for characters and objects. A data.win file packs hundreds of them."),
+    ("texture", "An image wrapped on a surface in a game to give it color and detail."),
+    ("tilemap|tileset|tile", "A map built from repeating small square pictures (tiles), typical of 2D games."),
+    ("audio|sound", "Sound files in a game come as wav, ogg or mp3; GameMaker games often keep them inside data.win or next to it."),
+    ("font", "A set of letter shapes. Fonts are .ttf or .otf files."),
+    ("ttf|otf", "Font file formats. Double-click one to preview and install it."),
+    ("svg", "A picture made of shapes and lines (vector) instead of pixels: it stays sharp at any size."),
+    ("ico|icon", "The small picture of a program or file. Stored as .ico on Windows."),
+    ("psd", "A Photoshop document with layers."),
+    ("obj|fbx|3d model", "3D model file formats used by games and design programs."),
+    ("avi|mov|webm", "Video container formats. mp4 is the most compatible; webm is common on the web."),
+    ("m4a|aac|opus", "Compressed audio formats; m4a/aac are used by Apple and YouTube, opus by Discord and the web."),
+    ("midi|mid", "Not audio but notes: a small file that tells an instrument what to play."),
+    ("tmp file|temporary file", "A scratch file a program makes while working. Usually safe to delete when the program is closed."),
+    ("thumbs.db|desktop.ini", "Hidden helper files Windows keeps in folders (thumbnails, folder settings). Harmless."),
+    ("pagefile|swap", "A file on disk that Windows uses as extra memory when RAM is full."),
+    ("hibernation|hiberfil", "A big hidden file Windows uses to save your session when the PC hibernates."),
+    ("appdata", "A hidden folder (C:\\Users\\you\\AppData) where programs and many games keep settings and saves."),
+    ("program files", "The folder where Windows programs are installed (C:\\Program Files and Program Files (x86))."),
+    ("recycle bin", "Where deleted files wait before being erased for good. Empty it to free the space."),
+    ("shortcut", "A small .lnk file that points to a program or folder somewhere else."),
+    ("environment variable|env var", "A named setting Windows gives to programs, like PATH or USERNAME."),
+    ("hash collision", "Two different files with the same hash. Practically impossible with SHA-256."),
+    ("magic number|file signature|header", "The first bytes of a file that tell what type it is: PNG starts with 89 50 4E 47, ZIP with PK."),
+    ("big endian|little endian|endian", "The order in which a number's bytes are stored. x86 PCs use little-endian."),
+    ("64-bit|32-bit|x64|x86", "How much memory a program can address and what kind of PC it runs on. A 64-bit program needs a 64-bit Windows."),
+    ("thread|multithreading", "A line of work inside a program. More threads let a CPU do several things at once."),
+    ("cores|core", "Independent processing units inside a CPU. More cores help with many tasks at once."),
+):
+    jv_kb(_k, _t)
+
+JV_GAMES_KB.update({
+    "cry of fear": "Cry of Fear is a free psychological survival-horror game made as a Half-Life mod, later standalone, by Team Psykskallar. It is dark and has strong themes.",
+    "fear to fathom": "Fears to Fathom is a series of short first-person horror games where ordinary situations turn dangerous. Each episode is its own game.",
+    "fears to fathom": "Fears to Fathom is a series of short first-person horror games where ordinary situations turn dangerous. Each episode is its own game.",
+    "minecraft": "Minecraft is the sandbox game about mining, crafting and building in a world made of blocks, by Mojang.",
+    "terraria": "Terraria is a 2D sandbox adventure of digging, building and boss fights.",
+    "hollow knight": "Hollow Knight is a hand-drawn 2D action-adventure set in the ruined insect kingdom of Hallownest, by Team Cherry.",
+    "celeste": "Celeste is a precise 2D platformer about climbing a mountain, with a heartfelt story. Made by Maddy Makes Games.",
+    "hades": "Hades is a fast roguelike action game where you fight out of the Greek underworld, by Supergiant Games.",
+    "stardew valley": "Stardew Valley is a farming and life simulation game made almost entirely by one developer, ConcernedApe.",
+    "among us": "Among Us is a social deduction game: crewmates fix the ship while impostors sabotage and hide.",
+    "portal": "Portal is a puzzle game by Valve where you create linked portals to solve test chambers.",
+    "half-life": "Half-Life is Valve's landmark first-person shooter series. Many mods, like Cry of Fear, were built on its engine.",
+    "half life": "Half-Life is Valve's landmark first-person shooter series. Many mods, like Cry of Fear, were built on its engine.",
+    "doom": "Doom is the classic first-person shooter by id Software, the model for the whole genre.",
+    "fnaf": "Five Nights at Freddy's is a horror series where you survive nights by watching cameras and managing power.",
+    "five nights at freddys": "Five Nights at Freddy's is a horror series where you survive nights by watching cameras and managing power.",
+    "omori": "OMORI is a psychological RPG made in RPG Maker, with a dreamlike world and darker themes.",
+    "pizza tower": "Pizza Tower is a fast, chaotic 2D platformer in the spirit of Wario Land, made in GameMaker.",
+    "hotline miami": "Hotline Miami is a top-down, ultra-violent action game with a neon soundtrack, made in GameMaker.",
+    "hyper light drifter": "Hyper Light Drifter is a 2D action RPG with pixel-art visuals, made in GameMaker.",
+    "gta": "Grand Theft Auto is Rockstar's open-world crime series.",
+    "fortnite": "Fortnite is Epic Games' battle royale and building game. It needs the Epic launcher.",
+    "roblox": "Roblox is a platform of user-made games, played through its own launcher.",
+})
+
+
+# ---------------- extract.key: a downloadable report about the selected file ----------------
+def jv_upd_export_file(text, base):
+    """The ONLY place the report file is written: a brand-new text file (never overwrites anything),
+    in the Downloads folder (or next to Jarvis if there is none). Returns its path."""
+    folder = CONTESTO.get("jv_export_dir")
+    if not folder:
+        dl = os.path.join(os.path.expanduser("~"), "Downloads")
+        folder = dl if os.path.isdir(dl) else os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_exports")
+    os.makedirs(folder, exist_ok=True)
+    stem = re.sub(r"[^\w.\-]", "_", base)[:50] or "file"
+    n = 0
+    while True:
+        name = f"Jarvis_report_{stem}" + (f"_{n}" if n else "") + ".txt"
+        path = os.path.join(folder, name)
+        try:
+            with open(path, "x", encoding="utf-8", newline="\r\n") as f:
+                f.write(text)
+            return path
+        except FileExistsError:
+            n += 1
+            if n > 999:
+                raise
+
+
+@cmdlet("extract.key", group="Port tools", usage="""extract.key <file>
+extract.key                  uses the file selected earlier with:  cd "<file>"
+Saves a text report about the file (what extract.port and interact.port show, plus how to verify it yourself)
+as a NEW file in your Downloads folder, and tells you where. The original file is never touched.""")
+def extract_key(args):
+    """Save a downloadable text report about the selected file (the file itself is never changed)."""
+    import io
+    import contextlib
+    path = pick(args, "extract.key")
+    if not path:
+        return
+    parts = []
+    for fn, title in ((extract_port, "FILE INFORMATION (extract.port)"), (interact_port, "CONTENTS AND WHAT YOU CAN DO (interact.port)")):
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                fn([path])
+        except Exception as e:
+            buf.write(f"(could not be produced: {type(e).__name__})\n")
+        txt = re.sub(r"\x1b\[[0-9;]*m", "", buf.getvalue()).strip("\n")
+        if "Cannot read file" in txt:
+            out(f"extract.key : Cannot read file '{safe(path)}'", RED)
+            out()
+            return
+        parts.append(f"{'=' * 70}\n{title}\n{'=' * 70}\n{txt}\n")
+    name = os.path.basename(path)
+    verify = (f"{'=' * 70}\nVERIFY IT YOURSELF\n{'=' * 70}\n"
+              f"PowerShell:  Get-FileHash -Algorithm SHA256 \"{os.path.abspath(path)}\"\n"
+              f"Compare the result with the SHA256 above (and with the author's, if the download page gives one).\n"
+              f"Windows Security: right-click the file > Scan with Microsoft Defender.\n")
+    head = (f"JARVIS FILE REPORT\nCreated : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"File    : {os.path.abspath(path)}\n"
+            f"This report was made read-only: the file above was not changed.\n\n")
+    try:
+        saved = jv_upd_export_file(head + "\n".join(parts) + "\n" + verify, name)
+    except OSError as e:
+        out(f"extract.key : Cannot save the report ({safe(e.strerror or e)})", RED)
+        out()
+        return
+    out()
+    out(f"Report saved: {safe(saved)}", GREEN)
+    out(f"  {human(os.path.getsize(saved))}, about {safe(name)}. The original file was not touched.", GRAY)
+    out()
+
+
+# ---------------- local "AI-like" brain: troubleshooting, how-to, comparisons, retrieval ----------------
+JV_STOP = set("""a an the is are was were be been am do does did to of in on at for with from by and or but if then so it its this that
+these those i you he she we they me my your our their can could would should will shall may might must have has had get got
+what which who whom how why when where there here about into onto out up down over under again just also very really much many
+some any no not yes please tell show give let know want need like using use used make makes made go goes going let s t don
+isnt doesnt dont cant wont sir yo hey ok okay hi hello""".split())
+
+JV_FAQ = [
+    # (keywords, question, answer)
+    ("game wont start launch open not working", "Why won't my game start?",
+     "The usual causes, in order: 1) a missing runtime (Visual C++ redistributable, DirectX or .NET), 2) an outdated graphics driver, "
+     "3) antivirus blocking the exe, 4) a damaged file after an interrupted download, 5) the wrong folder (start the game's own exe, not a launcher helper). "
+     "Try running the game as administrator and read any error text it shows. Say 'jarvis is it corrupt' with the data file selected to check for damage."),
+    ("game crashes crash random freezes freeze", "Why does my game crash or freeze?",
+     "Common reasons: overheating (check temperatures), too little RAM or VRAM, bad or outdated drivers, corrupt game files, or a faulty mod. "
+     "Update the graphics driver, close other programs, verify the game files in its launcher, and remove mods to test."),
+    ("dll missing not found error vcruntime msvcp", "How do I fix a 'DLL not found' error?",
+     "A missing DLL such as vcruntime140.dll or msvcp140.dll normally means a Microsoft runtime is missing: install the latest Visual C++ Redistributable (x86 and x64). "
+     "Never download single DLLs from random sites: they are a classic malware trick. Reinstalling the game or program also restores its own DLLs."),
+    ("low fps slow lag stutter performance laggy", "How can I get more FPS?",
+     "Lower the resolution and shadow/effects quality, close background programs, update the graphics driver, make sure the game uses the dedicated GPU "
+     "and not the integrated one, and check the PC is not overheating. Installing the game on an SSD helps loading and stutter."),
+    ("free space disk full storage clean clear", "How can I free disk space?",
+     "Empty the Recycle Bin, run Disk Cleanup (or Settings > Storage > Temporary files), uninstall unused programs and games, move big files to another drive, "
+     "and clear your Downloads folder. Say 'jarvis biggest files' to see what takes the most space in the current folder."),
+    ("backup save saves progress protect copy", "How do I back up my game saves?",
+     "Copy the save folder somewhere safe. Many games keep saves in C:\\Users\\<you>\\AppData\\Local or Roaming, in Documents, or inside the game folder. "
+     "Cloud saves (Steam, Epic) are an extra safety net. Back up before updating or modding a game."),
+    ("mod install modding modify add", "How do I install a mod safely?",
+     "Work on a copy of the game folder, read the mod's instructions, download only from the official page, and check the file with an antivirus first. "
+     "Keep the original data file: if the game breaks, put it back. Never run a mod's exe you do not trust."),
+    ("corrupt corrupted damaged broken file repair fix", "What should I do with a corrupt file?",
+     "Re-download or re-copy it from the source, then compare the SHA-256 with the one the author publishes. For a game, use 'verify integrity of game files' in the launcher. "
+     "For a zip, try 7-Zip; for a document, try the program's repair option. I can detect damage with 'jarvis is it corrupt' or 'denux.hunter', but I never change files."),
+    ("safe virus trust download exe malware suspicious", "How can I tell if a file is safe?",
+     "Check where it came from, its extension (a 'photo.jpg.exe' is a trap), its size, and scan it with Windows Security. "
+     "Compare the SHA-256 with the official one if the site gives it. Cracked games and 'free' keygens are the main source of infections. I cannot scan for viruses myself."),
+    ("hash sha256 verify compare check integrity", "How do I verify a download with a hash?",
+     "Select the file and say 'jarvis sha256' (or run extract.port), then compare the result with the hash on the download page. If even one character differs, "
+     "the file is damaged or has been tampered with."),
+    ("extension change rename hidden show file types", "How do I show file extensions in Windows?",
+     "Open File Explorer, View > Show > File name extensions. With extensions visible you can spot fake files like 'document.pdf.exe'."),
+    ("open file cant open program default associate", "Why can't Windows open a file?",
+     "No program is associated with that type. Right-click > Open with > Choose another app and tick 'Always use this app'. If you do not know what type it is, "
+     "select it and ask me 'what type is it'."),
+    ("data.win datawin gamemaker game files unpack extract", "What is a data.win file and can I open it?",
+     "It is the main data file of a GameMaker game: sprites, sounds, code, rooms. I can read its header, chunks and sprite count read-only. "
+     "Editing it needs tools such as UndertaleModTool, and you should always work on a copy."),
+    ("temp temporary delete safe cache", "Is it safe to delete temp files?",
+     "Yes for %TEMP% and the browser cache when the programs are closed; Windows recreates what it needs. Do not delete anything inside C:\\Windows."),
+    ("system32 delete windows folder remove", "Can I delete System32 or Windows files?",
+     "No. They are the core of Windows and deleting them can make the PC unbootable. That folder is the one place I will never open files from."),
+    ("ram memory upgrade enough need how much", "How much RAM do I need?",
+     "8 GB is the minimum for Windows today, 16 GB is comfortable for gaming and everyday work, 32 GB is for heavy editing, big mods or many programs at once. "
+     "Say 'jarvis status' to see how much memory is in use right now."),
+    ("ssd hdd upgrade faster boot load", "Should I move games to an SSD?",
+     "Yes, if you can: loading screens and texture streaming are far faster, and the PC feels snappier. Keep big archives and backups on the cheaper hard disk."),
+    ("overheat hot temperature fan cooling thermal", "What should I do if my PC overheats?",
+     "Clean the dust from fans and vents, make sure air can flow around the case or laptop, lower the game's settings, and consider new thermal paste if it is old. "
+     "Sustained temperatures above about 85 C on the CPU or GPU are too high."),
+    ("slow pc computer startup boot speed", "Why is my PC slow?",
+     "Check Task Manager (Ctrl+Shift+Esc) for programs using CPU, memory or disk; disable startup programs; keep at least 15% of the drive free; "
+     "install updates; and scan for malware. An old hard disk replaced by an SSD is the biggest single upgrade."),
+    ("update windows driver graphics nvidia amd intel gpu", "How do I update my graphics driver?",
+     "Download it from the maker's site (NVIDIA, AMD or Intel) or use their app (GeForce Experience, Adrenalin). Avoid third-party 'driver updater' programs."),
+    ("uninstall remove program game delete", "How do I uninstall a game properly?",
+     "Use Settings > Apps, or the launcher (Steam: right-click > Manage > Uninstall). Then keep or delete the save folder as you prefer: back it up first if you want your progress."),
+    ("portable install zip extract run game download", "I downloaded a game as a zip. How do I run it?",
+     "Extract the whole archive to a normal folder (not from inside the zip), open the folder and run the game's exe. "
+     "Do not run it from inside the archive: it will miss its files. Then say 'jarvis open <game name>' and I can start it for you."),
+    ("antivirus false positive blocked quarantine", "Why does my antivirus block a game?",
+     "Games and mods are often flagged by mistake (a 'false positive'), especially unsigned or cracked ones. If you trust the source, add an exclusion; "
+     "if not, leave it blocked. Check the file's SHA-256 against the official one first."),
+    ("zip rar 7z extract archive open unzip", "How do I open a zip, rar or 7z archive?",
+     "Windows opens zip natively (right-click > Extract All). For rar and 7z install 7-Zip, which is free. Select an archive and say 'jarvis what is inside' to list its entries."),
+    ("password protected zip locked archive", "What if an archive asks for a password?",
+     "The password comes from whoever made it: check the download page or readme. I cannot and will not try to guess or break passwords."),
+    ("path long too long error copy", "Why do I get a 'path too long' error?",
+     "Windows traditionally limits paths to 260 characters. Move the folder closer to the drive root (C:\\Games\\Name) or enable long paths in Windows settings."),
+    ("permission denied access administrator", "Why do I get 'access denied'?",
+     "The file is protected, in use by another program, or needs administrator rights. Close the program using it, move the file out of protected folders, "
+     "or run the program as administrator. Never take ownership of Windows system folders."),
+    ("steam library folder move install location", "How do I move a Steam game to another drive?",
+     "Steam > Settings > Storage: add a new library folder on the other drive, then in the game's Properties > Installed Files choose 'Move install folder'."),
+    ("save location where saves stored appdata documents", "Where does a game keep its saves?",
+     "Usually C:\\Users\\<you>\\AppData\\Local or Roaming under the game's name, or Documents\\My Games, or the game folder itself. "
+     "PCGamingWiki lists the exact location for most games."),
+    ("fullscreen window resolution black screen display", "My game shows a black screen. What now?",
+     "Try windowed mode (Alt+Enter), lower the resolution, update the graphics driver, run the game as administrator, and disable overlays (Discord, Steam). "
+     "Check that the game runs on the dedicated GPU."),
+    ("sound audio no sound crackling", "Why is there no sound in my game?",
+     "Check Windows' output device and the volume mixer, update the audio driver, and look at the game's own audio settings. "
+     "Crackling is often a sample-rate mismatch: set the device to 48000 Hz in Sound settings."),
+    ("controller gamepad joystick not working", "Why isn't my controller working?",
+     "Plug it in before starting the game, try another USB port, enable Steam Input if you use Steam, and check the game's controller settings. "
+     "Xbox controllers work natively; others may need a mapping tool."),
+    ("language change translate english", "How do I change a game's language?",
+     "Look in the game's options first; on Steam use Properties > General > Language; for others edit the settings file or use the launcher. "
+     "Some games keep language inside data files, which is why you should back them up before touching anything."),
+    ("shortcut desktop create icon", "How do I put a game on the desktop?",
+     "Right-click the game's exe > Send to > Desktop (create shortcut). Or just say 'jarvis open <game>' and I will start it."),
+    ("jarvis update upgrade implement patch install", "How do I update Jarvis?",
+     "Use 'implement jarvis <file.py>': nine safety checks run first, a backup is made, and Jarvis rolls back by itself if anything fails. "
+     "'implement jarvis -Dry' only runs the checks. 'security' shows the status of the guard."),
+    ("jarvis safe dangerous delete files harm", "Is Jarvis safe to use?",
+     "I am designed to be read-only: I read, count, search and describe files, and I only write when I update myself or when you ask me to export a report. "
+     "I never change your own files, and the update guard blocks code that deletes, downloads or runs things. Say 'security' to see the guard."),
+    ("jarvis commands list what can do help", "What can Jarvis do?",
+     "Find games and data.win files, inspect any file (size, type, hash, text, tables, zip contents, images), find corrupt files, show battery, memory and disk, "
+     "start your installed games, calculate and convert, explain tech terms, and test all of itself with 'go in maintenance'. Say 'examples' for a full list."),
+    ("jarvis wrong didnt understand fix teach learn", "What if Jarvis doesn't understand me?",
+     "Try rewording it in plain words, or say 'examples'. If a phrase should work and does not, tell the developer (your assistant) the exact sentence and it can be taught."),
+    ("select file selected port tools use", "How do I select a file for the port tools?",
+     "Use cd \"<file>\" or say 'jarvis select <file>'. Then extract.port, interact.port, extract.key and pluton.key work on it without typing the name again."),
+    ("export report save download file info", "How can I export the information of a file?",
+     "Select the file and run extract.key: it saves a text report (name, type, size, dates, hashes and contents summary) in your Downloads folder. "
+     "The original file is never touched."),
+    ("windows activate license key product", "How do I check if Windows is activated?",
+     "Settings > System > Activation. I cannot read or change license keys."),
+    ("restore point system recovery reset reinstall", "How do I undo a bad change in Windows?",
+     "Use System Restore (search 'Create a restore point' > System Restore) to go back to an earlier state, or Settings > Recovery > Reset this PC as a last resort. "
+     "Back up your files first."),
+    ("blue screen bsod stop code error restart", "What do I do after a blue screen?",
+     "Note the stop code, restart, update Windows and drivers, remove any software or hardware you installed just before it started, and run 'sfc /scannow' in an administrator terminal. "
+     "Repeated crashes point to RAM, disk or overheating."),
+    ("sfc scannow dism check system files repair windows", "How do I check Windows system files?",
+     "In an administrator terminal run 'sfc /scannow', and if it finds problems 'DISM /Online /Cleanup-Image /RestoreHealth'. These are Windows tools: I do not run them for you."),
+    ("firewall port network online multiplayer connect", "Why can't I play online?",
+     "Check that the firewall lets the game through, that the router is not blocking it, that the servers are up, and that your connection is stable (Ethernet beats Wi-Fi). "
+     "Restarting the router fixes many cases."),
+    ("ping high latency lag network online", "How can I lower my ping?",
+     "Use a cable, close downloads and streaming, choose a nearer server, and restart the router. Wi-Fi interference is the usual cause of spikes."),
+    ("emulator rom legal safe", "Are ROMs and emulators legal?",
+     "Emulators are legal. ROMs are only legal when you own the original game and make the copy yourself; downloading them from websites generally is not."),
+    ("bit 32 64 x86 x64 version which windows", "How do I know if Windows is 32 or 64 bit?",
+     "Settings > System > About shows 'System type'. Most PCs today are 64-bit. For a program file, select it and ask me 'is it 64-bit'."),
+    ("pdf edit convert merge", "How do I edit or convert a PDF?",
+     "Word and Edge can open simple PDFs; for merging or editing use a PDF tool. I can read a PDF's version and size, but not edit it."),
+    ("image resize convert png jpg compress", "How can I convert or shrink an image?",
+     "Paint or Photos can resize and re-save it as another format. PNG suits screenshots and sprites; JPG suits photos. I can tell you the dimensions with 'jarvis dimensions'."),
+    ("video convert compress mp4 size reduce", "How do I make a video smaller?",
+     "Re-encode it with HandBrake (free) using H.264 or H.265 at a lower bitrate or resolution. mp4 is the most compatible container."),
+    ("text encoding garbled characters utf strange symbols", "Why does a text file show strange characters?",
+     "It is being read with the wrong encoding. Try UTF-8, UTF-16 or Windows-1252. Select it and ask 'jarvis what encoding' to see what I detect."),
+    ("large file big gb slow copy transfer usb", "Why is copying a big file slow?",
+     "USB 2 ports and cheap flash drives are slow; many small files are slower than one big one; antivirus scanning adds time. Use USB 3 ports and an exFAT or NTFS drive for files over 4 GB."),
+    ("fat32 4gb file too large usb drive format", "Why can't I copy a file over 4 GB to my USB drive?",
+     "FAT32 cannot store files larger than 4 GB. Format the drive as exFAT or NTFS (copy its contents off first, formatting erases it)."),
+    ("hidden files show folder invisible", "How do I see hidden files?",
+     "File Explorer > View > Show > Hidden items. In this shell, use Get-ChildItem -Force (alias dir -Force)."),
+    ("default program browser change set", "How do I change the default program for a file type?",
+     "Settings > Apps > Default apps, then pick the extension and choose the program."),
+    ("startup programs disable boot slow", "How do I stop programs launching at startup?",
+     "Task Manager > Startup apps: select the program and press Disable. Fewer startup programs means a faster boot."),
+    ("screenshot capture screen record", "How do I take a screenshot?",
+     "Windows+Shift+S for a selection, PrintScreen for the whole screen, Windows+G for the Xbox Game Bar recorder."),
+    ("battery laptop drain life power", "How can I make my laptop battery last longer?",
+     "Lower the screen brightness, use Battery Saver, close background apps, and avoid heavy games unplugged. Say 'jarvis battery' to see the level now."),
+    ("compress zip smaller folder archive shrink", "How do I compress a folder?",
+     "Right-click > Send to > Compressed (zipped) folder, or use 7-Zip for stronger compression (7z)."),
+    ("duplicate files remove find same", "How can I find duplicate files?",
+     "Say 'jarvis duplicates' and I list files with identical content (same SHA-256) in the current folder. I show them; you choose what to delete."),
+    ("lost deleted recover recovery undelete", "Can I recover a deleted file?",
+     "Check the Recycle Bin first. After that, stop writing to the drive and use a recovery tool such as Recuva; the sooner the better. A backup is the real answer."),
+    ("ransomware encrypted files locked pay", "What if my files were encrypted by ransomware?",
+     "Disconnect from the network, do not pay, do not delete anything, and scan with Windows Security Offline scan. Restore from a backup; nomoreransom.org may have a free decryptor."),
+    ("password strong safe manager account", "How do I keep my accounts safe?",
+     "Use a different long password per site with a password manager, turn on two-factor authentication, and never type your password after clicking a link in an email."),
+    ("programming python script learn code", "Can Jarvis teach me Python?",
+     "Not in depth: I am a file-and-PC assistant. I can explain basic terms such as variable, function, loop and script. pwsh.py itself is Python, so reading it is a fine start."),
+    ("gamemaker sprite extract image export unpack", "Can I extract the sprites from a GameMaker game?",
+     "With 'jarvis how many sprites' I can count them, but extracting images needs a dedicated tool such as UndertaleModTool. Always work on a copy of data.win."),
+    ("steam family share library account refund", "How do I refund a Steam game?",
+     "Steam allows a refund within 14 days of purchase and under 2 hours of play, from Help > Steam Support > Purchases."),
+    ("epic launcher games library install location", "Where does the Epic launcher install games?",
+     "By default in C:\\Program Files\\Epic Games. You can choose another folder when you install, and I look there for installed games too."),
+]
+
+JV_COMPARE = {
+    frozenset(("ssd", "hdd")): "An SSD has no moving parts: it is far faster (boot, load times), silent and shock-resistant, but costs more per GB. An HDD is cheap and big, slower and can fail from knocks. Put Windows and games on an SSD, archives on an HDD.",
+    frozenset(("ram", "storage")): "RAM is the fast, temporary working memory (emptied at shutdown); storage (SSD/HDD) keeps your files permanently. RAM decides how many things you can run at once, storage how much you can keep.",
+    frozenset(("ram", "vram")): "RAM serves the whole PC; VRAM lives on the graphics card and holds textures and frames for the GPU. Games with high-resolution textures need plenty of VRAM.",
+    frozenset(("cpu", "gpu")): "The CPU is the general-purpose brain: few powerful cores for logic and many different tasks. The GPU has thousands of small cores built for drawing images and parallel maths. Games lean on both.",
+    frozenset(("zip", "rar")): "Both pack files into one archive. Zip is built into Windows and universal; rar often compresses a little better but needs WinRAR or 7-Zip to open.",
+    frozenset(("zip", "7z")): "Zip is universal and built into Windows; 7z compresses much more but needs 7-Zip (free) to open.",
+    frozenset(("png", "jpg")): "PNG is lossless and supports transparency: best for screenshots, sprites and text. JPG is lossy and much smaller: best for photos, but quality drops each time it is re-saved.",
+    frozenset(("mp3", "wav")): "WAV is uncompressed, perfect quality, huge files. MP3 is compressed with a small quality loss, ideal for music you carry around.",
+    frozenset(("mp3", "flac")): "FLAC is compressed without losing quality (about half the size of WAV); MP3 loses a little quality to be much smaller.",
+    frozenset(("mp4", "mkv")): "Both are containers for video. mp4 is the most compatible; mkv is more flexible (many audio tracks and subtitles) but less universally supported.",
+    frozenset(("sha256", "md5")): "Both are fingerprints of a file. MD5 is old and can be forged deliberately, so it only detects accidental damage; SHA-256 is the modern, trustworthy one.",
+    frozenset(("steam", "epic")): "Steam has the biggest library, community features and refunds; Epic gives away free games regularly and takes a smaller cut from developers. You can use both; I find games from either.",
+    frozenset(("exe", "msi")): "An exe is any Windows program (often a custom installer); an msi is a standard Windows Installer package, easier for administrators to manage and uninstall.",
+    frozenset(("32-bit", "64-bit")): "A 64-bit program can use far more than 4 GB of memory and needs a 64-bit Windows; 32-bit runs on both but is limited. Today almost everything is 64-bit.",
+    frozenset(("wifi", "ethernet")): "Ethernet (cable) is steadier, with lower and more constant ping; Wi-Fi is convenient but suffers from interference and distance. Use a cable for online games.",
+    frozenset(("txt", "docx")): "txt is plain text without formatting and opens anywhere; docx is a Word document with fonts, images and layout.",
+    frozenset(("csv", "xlsx")): "csv is plain text rows split by commas (tiny, universal, no formulas or styles); xlsx is a full Excel workbook with formatting, formulas and several sheets.",
+    frozenset(("json", "xml")): "Both hold structured data. JSON is shorter and easier to read; XML is wordier but supports attributes and strict schemas.",
+    frozenset(("antivirus", "firewall")): "An antivirus looks for malicious files and behaviour on your PC; a firewall controls which network connections are allowed. You need both: Windows Security includes them.",
+    frozenset(("virus", "malware")): "Malware is the umbrella term for any harmful software (viruses, ransomware, spyware, trojans). A virus is one kind that spreads by attaching itself to other files.",
+    frozenset(("python", "powershell")): "Python is a general-purpose programming language; PowerShell is Windows' command shell and scripting language. This shell imitates PowerShell and is written in Python.",
+    frozenset(("sprite", "texture")): "A sprite is a 2D picture drawn on screen as a character or object; a texture is an image wrapped around a surface (usually 3D) to give it color and detail.",
+    frozenset(("mod", "dlc")): "A mod is made by the community and changes a game; DLC is extra content made and released officially by the developer.",
+    frozenset(("data.win", "exe")): "In a GameMaker game the exe is the runner (the engine that starts the game) and data.win holds the game itself: sprites, sounds, code and rooms.",
+}
+
+
+def jv_stem(w):
+    for suf in ("ing", "ed", "es", "s"):
+        if len(w) > len(suf) + 2 and w.endswith(suf):
+            return w[:-len(suf)]
+    return w
+
+
+def jv_terms(text):
+    return [jv_stem(w) for w in re.findall(r"[a-z0-9.+#]+", text.lower().replace("'", "")) if w not in JV_STOP and len(w) > 1]
+
+
+def jv_faq_find(t):
+    """Best-matching FAQ entry for a question, as (score, entry) or None: simple weighted keyword retrieval."""
+    q = set(jv_terms(t))
+    if not q:
+        return None
+    docs = [(set(jv_terms(k + " " + qu)), set(jv_terms(k)), (k, qu, a)) for k, qu, a in JV_FAQ]
+    df = {}
+    for d, _, _ in docs:
+        for w in d:
+            df[w] = df.get(w, 0) + 1
+    n = len(docs)
+    best = None
+    for d, keys, e in docs:
+        hit = q & d
+        if not hit:
+            continue
+        sc = sum(math.log(1 + n / df[w]) * (1.6 if w in keys else 1.0) for w in hit)
+        sc += 0.5 * len(hit) / max(len(q), 1)
+        if best is None or sc > best[0]:
+            best = (sc, len(hit), e)
+    if best and best[1] >= 2:
+        return best[0], best[2]
+    return None
+
+
+def jv_compare(t):
+    """'difference between ssd and hdd', 'zip vs rar', 'ssd or hdd, which is better' -> an explanation, or None."""
+    s = t.lower().replace("'", "")
+    m = re.match(r"^(?:what is the |whats the |what are the |tell me the |explain the )?(?:difference|differences|diff)s? between (.+?) and (.+)$", s) \
+        or re.match(r"^(?:compare |comparison of )(.+?) (?:and|with|to|vs\.?|versus) (.+)$", s) \
+        or re.match(r"^(.+?) (?:vs\.?|versus|or) (.+?)(?: which (?:is|one is) (?:better|best|faster|safer)| which should i (?:use|choose|pick|get)| which one)?$", s)
+    if not m:
+        return None
+    a, b = (re.sub(r"^(?:an?|the)\s+", "", x.strip().strip("?!. ")) for x in m.groups())
+    norm = lambda x: {"hard disk": "hdd", "hard drive": "hdd", "ssd drive": "ssd", "solid state": "ssd", "wi-fi": "wifi",
+                      "wireless": "wifi", "cable": "ethernet", "7zip": "7z", "7-zip": "7z", "jpeg": "jpg", "memory": "ram",
+                      "processor": "cpu", "graphics card": "gpu", "video card": "gpu", "data win": "data.win",
+                      "sha-256": "sha256", "64 bit": "64-bit", "32 bit": "32-bit", "epic games": "epic",
+                      "storage": "storage", "disk": "storage", "hard disk drive": "hdd"}.get(x, x)
+    a, b = norm(a), norm(b)
+    hit = JV_COMPARE.get(frozenset((a, b)))
+    if hit:
+        return hit
+    ea = [e for e in JV_KB if a in e[0]]
+    eb = [e for e in JV_KB if b in e[0]]
+    if ea and eb and a != b:
+        return f"{a.upper() if len(a) <= 5 else a.capitalize()}: {ea[0][1]}  |  {b.upper() if len(b) <= 5 else b.capitalize()}: {eb[0][1]}"
+    return None
+
+
+def jv_brain(orig, t):
+    """The local 'AI-like' layer: comparisons, how-to / why / troubleshooting retrieval. Only for PC, file and game topics."""
+    s = t.strip().rstrip("?!. ").replace("’", "'")
+    c = jv_compare(s)
+    if c:
+        jarvis_say(c)
+        return True
+    q = bool(re.match(r"^(?:how|why|what should|what do i|what can i|what to do|should i|can i|could i|is it|is there|is this|are there|"
+                      r"which|where|when|do i|does|will|would|my |i have|i get|i cant|i can't|i dont|i don't|it (?:wont|won't|doesnt|doesn't|says|keeps)|"
+                      r"help with|problem|issue|error|fix|solve|recommend|suggest|advice|any tips|tips)", s))
+    named = CONTESTO.get("jv_named")
+    if not (q or (named and len(s.split()) >= 2)):
+        return False
+    hit = jv_faq_find(s + (" jarvis" if CONTESTO.get("jv_said_name") else ""))
+    if not hit:
+        return False
+    sc, (k, qu, a) = hit
+    jarvis_say(a)
+    others = [e for e in JV_FAQ if e[1] != qu and len(set(jv_terms(e[0])) & set(jv_terms(s))) >= 2][:2]
+    if others:
+        out("    Related: " + "  |  ".join(e[1] for e in others), GRAY)
+    return True
+
+
+
+def jv_know(orig, t):
+    """Knowledge: maths, conversions, dates, a glossary of file types and tech terms, commands, games, about me."""
+    from datetime import date
+    s = t.strip().rstrip("?!. ").replace("’", "'")
+    s = s.replace("what's", "what is").replace("whats", "what is").replace("who's", "who is")
+    say = jarvis_say
+
+    c = jv_compare(s)                  # 'difference between ssd and hdd', 'zip vs rar'
+    if c:
+        say(c)
+        return True
+
+    # --- maths
+    m = re.match(r"^(?:what is|what s|whats|calculate|calc|compute|solve|how much is|quanto fa|quanto è|quanto e|calcola|"
+                 r"fammi il conto di|result of)\s+(.+)$", s)
+    expr = m.group(1) if m else (s if re.match(r"^(?:square root of|sqrt|radice)", s) else s if re.fullmatch(r"[\d\s+\-*/().,%^x×÷]+", s) and re.search(r"\d\s*[+\-*/^x×÷%]\s*\(?\d", s) else None)
+    if expr:
+        try:
+            v = jv_calc(expr)
+        except ZeroDivisionError:
+            say("Division by zero, sir: that is undefined.")
+            return True
+        except (OverflowError, ValueError, SyntaxError, RecursionError, MemoryError):
+            v = None
+        if v is not None:
+            say(f"{expr.strip()} = {jv_numfmt(v)}, sir.")
+            return True
+
+    # --- unit conversion
+    m = re.match(r"^(?:convert\s+|how (?:many|much) is\s+|converti\s+|quanti\s+\w+\s+sono\s+)?(-?\d+(?:[.,]\d+)?)\s*"
+                 r"(°?[a-z]+)\s+(?:to|in|into|a|in)\s+(°?[a-z]+)$", s)
+    if m:
+        val = float(m.group(1).replace(",", "."))
+        ua, ub = JV_UNITS.get(m.group(2)), JV_UNITS.get(m.group(3))
+        if ua and ub and ua[0] == ub[0]:
+            if ua[0] == "temp":
+                c = val if ua[1] == "c" else (val - 32) * 5 / 9 if ua[1] == "f" else val - 273.15
+                res = c if ub[1] == "c" else c * 9 / 5 + 32 if ub[1] == "f" else c + 273.15
+            else:
+                res = val * ua[1] / ub[1]
+            say(f"{jv_numfmt(val)} {m.group(2)} = {jv_numfmt(round(res, 6))} {m.group(3)}, sir."
+                + (" (1 KB = 1024 bytes here.)" if ua[0] == "data" else ""))
+            return True
+        if ua and ub:
+            say(f"I can't convert {m.group(2)} to {m.group(3)}, sir: they measure different things.")
+            return True
+
+    # --- dates
+    today = datetime.now().date()
+
+    def nice(d):
+        return d.strftime("%A %d %B %Y")
+
+    def fix(d, noyear):
+        if noyear and d < today:
+            try:
+                return d.replace(year=d.year + 1)
+            except ValueError:
+                return d
+        return d
+    m = re.match(r"^(?:how many days|how long|quanti giorni|days)\s+(?:are there |ci sono |mancano |is it |left )?"
+                 r"(?:until|till|to|left until|left till|before|a|al|alla|fino a|fino al)\s+(.+)$", s)
+    if m:
+        r = jv_date(m.group(1), today)
+        if r:
+            d = fix(*r)
+            n = (d - today).days
+            say("That is today, sir." if n == 0 else f"{n:,} day(s) until {nice(d)}, sir." if n > 0
+                else f"{nice(d)} was {-n:,} day(s) ago, sir.")
+            return True
+    m = re.match(r"^(?:how many days|how long|quanti giorni|days)\s+(?:has it been |sono passati )?(?:since|from|ago|da)\s+(.+)$", s)
+    if m:
+        r = jv_date(m.group(1), today)
+        if r:
+            d = r[0] if not r[1] or r[0] <= today else r[0].replace(year=r[0].year - 1)
+            say(f"{(today - d).days:,} day(s) since {nice(d)}, sir.")
+            return True
+    m = re.match(r"^(?:days|how many days|quanti giorni) between\s+(.+?)\s+and\s+(.+)$", s)
+    if m:
+        a, b = jv_date(m.group(1), today), jv_date(m.group(2), today)
+        if a and b:
+            say(f"{abs((fix(*b) - fix(*a)).days):,} day(s) between {nice(a[0])} and {nice(b[0])}, sir.")
+            return True
+    m = re.match(r"^(?:what day|which day|che giorno)\s+(?:of the week |della settimana )?(?:is|was|will be|è|sarà|era)\s+(?:it on |on |il )?(.+)$", s)
+    if m:
+        r = jv_date(m.group(1), today)
+        if r:
+            d = fix(*r)
+            say(f"{nice(d)}, sir.")
+            return True
+
+    # --- who/what am I
+    if re.search(r"\b(?:who (?:made|created|built|programmed|wrote) you|your (?:creator|maker|author)|chi ti ha (?:creato|fatto|programmato))\b", s):
+        say("I'm a Python program living in pwsh.py on your PC, sir, built one request at a time from your instructions. "
+            "No cloud, no neural network inside me: I understand the phrases and patterns I was taught, which is why "
+            "you can keep teaching me more.")
+        return True
+    if re.search(r"\b(?:are you (?:an? )?(?:ai|bot|robot|real|human|smart|intelligent|chatgpt|claude|alive)|sei (?:un'?)?(?:ai|robot|intelligente|vivo|umano))\b", s):
+        say("I'm a rule-based assistant, sir, not a language model: quick and careful with files, games and your PC, "
+            "but I only know what I was taught. Say 'examples' to see how much that is.")
+        return True
+    if re.search(r"\b(?:do you (?:speak|understand|know) (?:italian|english)|parli italiano|capisci l'?italiano|speak italian)\b", s):
+        say("Yes, sir. I understand English and Italian, but I always answer in English.")
+        return True
+    if re.search(r"\b(?:weather|meteo|news|notizie|google|youtube|stock price|bitcoin|search the web|cerca su internet)\b", s) \
+            and not re.search(r"\.\w{2,4}\b", s):
+        say("I run offline, sir: no internet, so no weather, news or web searches. Files, games, your PC, maths, "
+            "units, dates and a glossary of tech terms are my territory.")
+        return True
+
+    # --- definitions: "what is a dll", "explain sha256", "tell me about undertale", "what does dir do"
+    m = re.match(r"^(?:what is|what s|whats|what are|what does|what do|who is|who s|explain|define|tell me about|describe|"
+                 r"meaning of|what is the meaning of|cos è|cos'è|che cos è|che cos'è|cosa è|cosa sono|spiegami|spiega|"
+                 r"cosa significa|che significa|parlami di|dimmi di)\s+(?:an? |the |un |una |uno |il |lo |la |i |gli |le |l'|l )?"
+                 r"(.+?)(?:\s+(?:mean|means|do|does|do for|stands for|file|files|format|extension|estensione|significa))*$", s)
+    if m:
+        term = m.group(1).strip().strip("'\"` ").lstrip(".")
+        term = re.sub(r"^(?:\.|file |un |una |the )", "", term)
+        key = re.sub(r"\s+", " ", term.lower())
+        if CONTESTO.get("file") and key in ("sha256", "sha-256", "md5", "hash", "checksum", "digest"):
+            return False                  # a file is selected: that is a question about the file, not the word
+        if key in JV_GAMES_KB:
+            say(JV_GAMES_KB[key] + f" Say 'jarvis open {key}' to start it.")
+            return True
+        for g, txt in JV_GAMES_KB.items():
+            if len(key) >= 4 and difflib.get_close_matches(key, [g], n=1, cutoff=0.82):
+                say(txt + f" Say 'jarvis open {g}' to start it.")
+                return True
+        fn = CMDLETS.get(key.replace(" ", "-")) or CMDLETS.get(key)
+        hits = sorted((e for e in JV_KB if key in e[0]), key=lambda e: e[0][0] != key)
+        if fn is not None and not hits:
+            n = fn.nome
+            say(f"{n}: {describe(n)}.")
+            for line in (USAGE.get(n) or STD_USAGE.get(n) or "").splitlines()[:6]:
+                out("    " + line, GRAY)
+            if ALIASES.get(n):
+                out("    aliases: " + ", ".join(ALIASES[n]), GRAY)
+            return True
+        if not hits and len(key) >= 4:
+            allk = [k for keys, _ in JV_KB for k in keys]
+            close = difflib.get_close_matches(key, allk, n=1, cutoff=0.88)
+            hits = [e for e in JV_KB if close and close[0] in e[0]]
+        if hits:
+            name = key if len(key) <= 12 else key[:12]
+            say(f"{hits[0][0][0].upper() if len(hits[0][0][0]) <= 5 else hits[0][0][0].capitalize()}: {hits[0][1]}")
+            return True
+        if jv_brain(orig, t):
+            return True
+        if CONTESTO.get("jv_named") and re.match(r"^(?:what is|what are|who is|what does|explain|define|tell me about|"
+                                                 r"cos|che cos|spiega|parlami)", s) and len(key) >= 3:
+            say(f"I don't have '{safe(key)}' in my glossary yet, sir. I know file types, PC and Windows terms, security, "
+                f"games and programming words. Ask me about a file, or say 'jarvis examples'.")
+            return True
+    # a bare word or two: "jarvis dll", "jarvis ssd", "jarvis cry of fear"
+    if CONTESTO.get("jv_named") and 1 <= len(s.split()) <= 3 and not CONTESTO.get("file"):
+        key = s.strip("'\"` ").lstrip(".")
+        if key in JV_GAMES_KB:
+            say(JV_GAMES_KB[key] + f" Say 'jarvis open {key}' to start it.")
+            return True
+        hits = sorted((e for e in JV_KB if key in e[0]), key=lambda e: e[0][0] != key)
+        if hits and len(key) >= 2:
+            say(f"{hits[0][0][0].upper() if len(hits[0][0][0]) <= 5 else hits[0][0][0].capitalize()}: {hits[0][1]}")
+            return True
+    return jv_brain(orig, t)
+
+
+def jv_typofix(texto):
+    """Repair obvious typos of Jarvis' own keywords ('serach', 'biggset'). Names of files are never touched."""
+    vocab = ["open", "launch", "select", "search", "find", "scan", "status", "battery", "memory", "corrupt", "damaged",
+             "duplicates", "biggest", "largest", "smallest", "newest", "oldest", "modified", "folder", "files", "lines",
+             "words", "columns", "tables", "dimensions", "checksum", "maintenance", "examples", "calculate", "convert",
+             "explain", "describe", "inside", "contents", "games", "security", "weather", "joke", "again", "repeat"]
+    out_t, changed = [], False
+    for tok in texto.split():
+        bare = tok.strip(".,;:!?()[]{}\"'`")
+        low = bare.lower()
+        if (len(bare) >= 5 and bare.isalpha() and low not in vocab and not os.path.exists(os.path.expanduser(bare))
+                and low != "jarvis"):
+            c = difflib.get_close_matches(low, vocab, n=1, cutoff=0.8)
+            if c:
+                tok = tok.replace(bare, c[0])
+                changed = True
+        out_t.append(tok)
+    return " ".join(out_t) if changed else texto
+
+
+def jv_didnt_catch(text):
+    t = re.sub(JV_NAMED_RE, " ", text, flags=re.I).strip().lower().rstrip("?!. ")
+    if re.match(r"^(?:what|who|why|when|where|how|which|is|are|can|does|do|did|will|would|should|cosa|che|chi|perch|quando|dove|come|quale)\b", t):
+        jarvis_say("I can't answer that one offline, sir. I know files, games, your PC, maths, units, dates and a glossary of "
+                   "file types and tech terms.")
+    else:
+        jarvis_say("I'm afraid I didn't catch that, sir.")
+    close = difflib.get_close_matches(t, [x.lower() for x in JV_SUGGEST], n=3, cutoff=0.35) if t else []
+    if close:
+        jarvis_say("Did you mean: " + "  |  ".join(f"'{c}'" for c in close) + "?")
+    else:
+        jarvis_say("Try 'examples' to see everything I understand, or 'help'.")
+
+
+JV_ACTION_VERBS = ("open", "launch", "start", "play", "run", "read", "select", "show", "find", "scan", "search", "list",
+                   "check", "tell", "explain", "calculate", "convert", "count", "give", "get", "see", "view", "look",
+                   "apri", "avvia", "lancia", "gioca", "leggi", "seleziona", "mostra", "trova", "cerca", "controlla",
+                   "dimmi", "spiega", "calcola", "converti", "conta", "fammi", "dammi", "vedere", "guarda")
+
+
+def jv_unwrap(orig):
+    """'can you open X' / 'i want to play X' / 'let's open X' / 'puoi aprire X' -> 'open X';
+    'i want to know what a dll is' / 'puoi dirmi cosa e una gpu' -> 'what is a dll' / 'cosa e una gpu'."""
+    low = orig.lower().replace("'", " ").strip()
+    m = re.match(r"^(?:(?:please|pls|per favore|ok|so|hey|ehi)[,\s]+)*(?:i want to know|i wanna know|i d like to know|"
+                 r"i would like to know|can you tell me|could you tell me|do you know|you know|tell me|let me know|"
+                 r"explain to me|explain|describe|define|spiegami|spiega|descrivimi|"
+                 r"puoi dirmi|puoi dire|mi puoi dire|mi sai dire|sai dirmi|sai dire|dimmi|vorrei sapere|voglio sapere|"
+                 r"mi dici|mi spieghi|puoi spiegarmi|puoi spiegare|mi spiegheresti)\s+"
+                 r"((?:what|who|how|which|where|why|when|cosa|che|chi|come|quale|quanto|dove|perche|quando)\b.*)$", low)
+    if m:
+        orig = low = m.group(1).strip()
+        mm = re.match(r"^(what|who|cosa|chi)\s+(?:an?\s+|the\s+)?(.+?)\s+(is|are|means|mean)$", low)
+        if mm and mm.group(1) in ("what", "who"):
+            orig = low = f"what is {mm.group(2)}"
+        return jv_unwrap(orig) if orig != low else orig
+    s = orig.strip()
+    low = s.lower()
+    m = re.match(r"^(?:(?:please|pls|per favore|per piacere|ok|so|then|and|ehi|hey)[,\s]+)*"
+                 r"(?:can you|could you|would you|will you|can u|could u|would u|can you please|could you please|"
+                 r"i want you to|i need you to|i would like you to|i d like you to|i want to|i wanna|i need to|i d like to|"
+                 r"i would like to|lets|let us|let s|go ahead and|try to|you should|you can|"
+                 r"puoi|potresti|mi puoi|mi potresti|riesci a|vorrei|voglio|devo|dovresti|fammi|facciamo|andiamo a|"
+                 r"mi fai il favore di|ho bisogno di|ho voglia di|mi va di)\s+(.+)$", low.replace("'", " "))
+    if not m:
+        return orig
+    rest = m.group(1).strip()
+    first = rest.split()[0] if rest.split() else ""
+    stem = {"aprirmi": "apri", "avviarmi": "avvia", "lanciarmi": "lancia", "mostrarmi": "mostra", "leggermi": "leggi",
+            "trovarmi": "trova", "cercarmi": "cerca", "aprirmelo": "apri", "farmi": "fammi", "darmi": "dammi",
+            "aprire": "apri", "avviare": "avvia", "lanciare": "lancia", "giocare": "gioca", "leggere": "leggi",
+            "selezionare": "seleziona", "mostrare": "mostra", "trovare": "trova", "cercare": "cerca",
+            "controllare": "controlla", "calcolare": "calcola", "convertire": "converti", "vedere": "guarda",
+            "spiegare": "spiega", "contare": "conta"}.get(first)
+    if stem:
+        rest = stem + rest[len(first):]
+        first = stem
+    if first in JV_ACTION_VERBS:
+        return jv_unwrap(rest) if rest.split()[0] in ("explain", "tell", "describe", "spiega", "dimmi") else rest
+    return orig
+
+
+def jv_interpret_core(texto):
     """Map a plain-language request (English or Italian) to a read-only command.
     Returns True if it understood and handled the request."""
     # the word 'jarvis' counts anywhere in the sentence ('apri cry of fear jarvis', 'ehi jarvis apri ...')
     CONTESTO["jv_named"] = bool(re.search(JV_NAMED_RE, texto, re.I)) or bool(CONTESTO.get("jv_cmd"))
+    CONTESTO["jv_said_name"] = bool(re.search(JV_NAMED_RE, texto, re.I))
     orig = re.sub(r"^(?:(?:hey|ok|okay|hi|hello|ciao|ehi|ehy)[,\s]+)?jarvis\b[,:!\s]*", "",
                   texto.strip(), flags=re.I)
     orig = re.sub(JV_NAMED_RE, " ", orig, flags=re.I)
     orig = re.sub(r"\s{2,}", " ", orig).strip(" ,;:")
     orig = orig.strip().rstrip("?!. ").strip()
+    orig = jv_unwrap(orig)
     t = orig.lower()
     sel = CONTESTO.get("file")
 
@@ -3410,9 +4568,17 @@ def jarvis_interpret(texto):
         jarvis_status("Current status")
         return True
 
+    if CONTESTO.get("jv_named") and jv_chat(orig, t):      # small talk: 'jarvis perfect', 'yo big jarvis'
+        return True
+    if sel and os.path.isfile(sel) and re.search(r"\b(?:export|extract key|extract\.key)\b|\b(?:save|make|create|generate|write|give me|get|download)\b.*\b(?:report|summary file)\b", t) \
+            and not re.search(r"\.(?:txt|csv|json)\b", t):
+        extract_key([])                # 'jarvis export it', 'give me a report of this file'
+        return True
     if jv_is_maintenance(t):           # "go in maintenance", "test all the commands"...
         jarvis_say("Entering maintenance mode, sir. I'm putting everything else on hold and testing every command.")
         jv_upd_maintenance_cmd([])
+        return True
+    if jv_know(orig, t):               # maths, conversions, dates, glossary, commands, games
         return True
     if jv_deep(orig, t, sel):          # specific questions about files/folders + opening files
         return True
@@ -3496,6 +4662,33 @@ def jarvis_interpret(texto):
     return False
 
 
+def jarvis_interpret(texto):
+    """Understand a plain-language request. Also: 'again' repeats the last one, and obvious typos of my own
+    keywords are repaired when the first reading finds nothing."""
+    low = re.sub(JV_NAMED_RE, " ", texto, flags=re.I).lower()
+    words = [w for w in re.findall(r"[a-zà-ÿ']+", low) if w not in JV_FILLER]
+    if words and len(words) <= 5 and re.fullmatch(
+            r"(?:do (?:that|it|this) again|again|repeat(?: that| it)?|once more|one more time|ancora|di nuovo|"
+            r"ripeti(?:lo)?|rifallo|fallo di nuovo|ancora una volta)", " ".join(words)):
+        last = CONTESTO.get("jv_last")
+        if not last:
+            jarvis_say("There is nothing to repeat yet, sir.")
+            return True
+        jarvis_say(f"Repeating: {safe(last)}")
+        return jv_interpret_core(last)
+    CONTESTO["jv_nostore"] = False
+    r = jv_interpret_core(texto)
+    if not r:
+        fixed = jv_typofix(texto)
+        if fixed != texto:
+            r = jv_interpret_core(fixed)
+            if r:
+                texto = fixed
+    if r and not CONTESTO.pop("jv_nostore", False):
+        CONTESTO["jv_last"] = texto
+    return r
+
+
 @cmdlet("Jarvis", group="Assistant", usage="""jarvis <request in plain English or Italian>
   jarvis find my games
   jarvis scan this PC for corrupt files
@@ -3519,8 +4712,7 @@ def jarvis_cmd(args):
     finally:
         CONTESTO["jv_cmd"] = False
     if not handled:
-        jarvis_say("I'm afraid I didn't catch that, sir. Try 'find my games', 'scan this PC', "
-                   "'open <file>', 'examples' or 'help'.")
+        jv_didnt_catch(" ".join(args))
 
 
 # ======================= JARVIS SELF-UPDATE =======================
@@ -4573,6 +5765,22 @@ def jv_upd_selftest():
         for s in samples:
             run(f"interact.port {s}", cmd("interact.port", s), need=["What you can DO"], bad=["Could not read"],
                 red=(s == "bad.png"))
+        CONTESTO["jv_export_dir"] = os.path.join(tmp, "exports")
+        run("extract.key saves a report (in the temporary folder)", cmd("extract.key", "a.txt"), need=["Report saved"])
+        def keyfile():
+            d = os.path.join(tmp, "exports")
+            got = [n for n in os.listdir(d)] if os.path.isdir(d) else []
+            if len(got) != 1:
+                raise RuntimeError(f"expected one report, found {got}")
+            with open(os.path.join(d, got[0]), encoding="utf-8") as f:
+                body = f.read()
+            for need in ("JARVIS FILE REPORT", "SHA256", "VERIFY IT YOURSELF", "alpha beta"):
+                if need not in body:
+                    raise RuntimeError(f"the report lacks '{need}'")
+            print("ok")
+        run("the report file has everything in it", keyfile)
+        run("extract.key on a missing file (must show an error)", cmd("extract.key", "nope_missing"), expect="err")
+        CONTESTO.pop("jv_export_dir", None)
         run("extract.port on a missing file (must show an error)", cmd("extract.port", "nope_missing"), expect="err")
         run("denux.hunter finds the damaged PNG", cmd("denux.hunter", ".", "-Recurse"), need=["bad.png", "CORRUPT"], red=True)
         run("denux.hunter on one good file", cmd("denux.hunter", "a.txt"), need=["0 corrupt"])
@@ -4602,10 +5810,47 @@ def jv_upd_selftest():
             ("select sub/data.win", ["Selected"]), ("what game is this", ["2 chunks"]), ("how many sprites", ["0 sprites"]),
             ("list the chunks", ["GEN8", "SPRT"]), ("go up", ["Now in"]), ("read a.txt", ["alpha beta"]),
             ("what is selected", []), ("deselect", []),
+            ("jarvis thats sick", ["sir"]),
+            ("jarvis why does my game crash", ["overheating"]), ("jarvis how do i fix a dll not found error", ["Redistributable"]),
+            ("jarvis difference between ssd and hdd", ["moving parts"]), ("jarvis zip vs rar", ["WinRAR"]),
+            ("jarvis how can i free disk space", ["Disk Cleanup"]), ("jarvis is it safe to delete temp files", ["Windows recreates"]), ("jarvis ur the best", ["sir"]), ("jarvis whats your name", ["JARVIS"]), ("jarvis lol", ["sir"]),
+            ("what is a vpn", ["tunnel"]), ("i want to know what a dll is", ["library"]), ("cosa significa ssd", ["solid-state"]),
+            ("tell me about cry of fear", ["horror"]), ("can you calculate 12*12", ["144"]), ("jarvis ssd", ["solid-state"]),
             ("tell me about a.txt", ["SHA256"]), ("what's inside a.txt", ["First 15 lines"]),
         ]
         for text, need in phrases:
             run(f"jarvis: {text}", say(text), need=need)
+
+        section("Jarvis brain (small talk, knowledge, maths, dates, typos)")
+        brain = [
+            ("jarvis perfect", ["JARVIS"]), ("yo big jarvis", ["JARVIS"]), ("hey jarvis how are you", ["JARVIS"]),
+            ("jarvis tell me a joke", ["JARVIS"]), ("jarvis thats awesome", ["JARVIS"]), ("good night jarvis", ["sir"]),
+            ("jarvis what is 15% of 80", ["= 12"]), ("jarvis calculate 2+2*3", ["= 8"]), ("jarvis what is 7 times 8", ["= 56"]),
+            ("what is 5 divided by 0", ["Division by zero"]), ("jarvis square root of 144", ["= 12"]),
+            ("jarvis convert 5 km to miles", ["3.10"]), ("jarvis 100 f to c", ["37.7"]), ("jarvis 2 gb in mb", ["2,048"]),
+            ("jarvis how many days until christmas", ["day(s) until"]), ("jarvis what day is 25/12/2026", ["Friday"]),
+            ("jarvis days between 1/1/2026 and 1/3/2026", ["59 day"]),
+            ("jarvis what is a dll", ["shared library"]), ("jarvis explain sha256", ["fingerprint"]),
+            ("jarvis what is a .win file", ["GameMaker"]), ("jarvis what does dir do", ["Get-ChildItem"]),
+            ("jarvis tell me about undertale", ["Toby Fox"]), ("jarvis tell me about cry of fear", ["Psykskallar"]),
+            ("jarvis who made you", ["Python"]), ("jarvis are you an ai", ["rule-based"]),
+            ("jarvis whats the weather", ["offline"]), ("jarvis blorp zzz qqq", None),
+        ]
+        for text, need in brain:
+            if need is None:
+                run("jarvis: an unknown request gets a helpful answer", lambda: jv_didnt_catch("jarvis blorp zzz qqq"),
+                    need=["didn't catch"])
+            else:
+                run(f"jarvis: {text}", say(text), need=need)
+        def typo():
+            if jv_typofix("show the biggset files") != "show the biggest files":
+                raise RuntimeError("typo not repaired")
+            if jv_typofix("open undertale") != "open undertale":
+                raise RuntimeError("a good sentence was changed")
+            print("ok")
+        run("typos of my own keywords are repaired", typo)
+        run("jarvis: what time is it, then 'again'", lambda: (say("jarvis what time is it")(), say("jarvis again")()),
+            need=["Repeating", ":"])
 
         section("Maintenance wording")
         def wording():
@@ -5212,138 +6457,6 @@ def carica_estensioni():
                 out(f"Errore caricando ext/{f}: {e}", RED)
 
 
-def jv_hl(buf):
-    """Colors of the line while you type: the command yellow, the word jarvis cyan, quoted text blue, the rest normal."""
-    def words(t, back):
-        return re.sub(r"(?i)\bjarvis\b", lambda x: CYAN + x.group(0) + back, t)
-    m = re.match(r"(\s*)(\S+)", buf)
-    res, i, q, run = "", 0, None, ""
-    if m:
-        res, i = m.group(1) + YELLOW + words(m.group(2), YELLOW) + TEXT, m.end()
-    while i < len(buf):
-        c = buf[i]
-        if q:
-            res += c
-            if c == q:
-                res, q = res + TEXT, None
-        elif c in "\"'":
-            res, run, q = res + words(run, TEXT) + BLUE + c, "", c
-        else:
-            run += c
-        i += 1
-    return res + words(run, TEXT) + TEXT
-
-
-JV_HIST = []
-
-
-def jv_getkey():
-    """One key: a character, or 'left' 'right' 'up' 'down' 'home' 'end' 'del' 'enter' 'bs' 'eof'."""
-    if os.name == "nt":
-        import msvcrt
-        c = msvcrt.getwch()
-        if c in ("\x00", "\xe0"):
-            return {"K": "left", "M": "right", "H": "up", "P": "down", "G": "home", "O": "end", "S": "del"}.get(msvcrt.getwch(), "")
-        if c == "\x03":
-            raise KeyboardInterrupt
-        return {"\r": "enter", "\n": "enter", "\x08": "bs", "\x1a": "eof", "\x01": "home", "\x05": "end"}.get(c, c)
-    import select
-    fd = sys.stdin.fileno()
-    dec = codecs.getincrementaldecoder("utf-8")("replace")
-    while True:
-        b = os.read(fd, 1)
-        if not b:
-            return "eof"
-        if b == b"\x1b":
-            if not select.select([fd], [], [], 0.04)[0]:
-                return ""
-            if os.read(fd, 1) not in (b"[", b"O"):
-                return ""
-            seq = b""
-            while True:
-                x = os.read(fd, 1)
-                seq += x
-                if not x or 0x40 <= x[0] <= 0x7e:
-                    break
-            return {b"A": "up", b"B": "down", b"C": "right", b"D": "left", b"H": "home", b"F": "end",
-                    b"3~": "del", b"1~": "home", b"7~": "home", b"4~": "end", b"8~": "end"}.get(seq, "")
-        if b in (b"\r", b"\n"):
-            return "enter"
-        if b in (b"\x7f", b"\x08"):
-            return "bs"
-        if b == b"\x04":
-            return "eof"
-        if b == b"\x01":
-            return "home"
-        if b == b"\x05":
-            return "end"
-        c = dec.decode(b)
-        if c:
-            return c
-
-
-def leggi_riga():
-    """The prompt with live colors (needs a real terminal; otherwise plain input())."""
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        return input(prompt())
-    base = f"PS {os.getcwd()}> "
-    buf, pos, hist, draft = "", 0, len(JV_HIST), ""
-    old = None
-    if os.name != "nt":
-        import termios
-        import tty
-        old = termios.tcgetattr(sys.stdin.fileno())
-        tty.setcbreak(sys.stdin.fileno())
-
-    def draw():
-        col = len(base) + pos
-        sys.stdout.write("\r" + TEXT + base + jv_hl(buf) + "\x1b[K\r" + (f"\x1b[{col}C" if col else ""))
-        sys.stdout.flush()
-    try:
-        draw()
-        while True:
-            k = jv_getkey()
-            if k == "enter":
-                break
-            if k == "eof":
-                if not buf:
-                    sys.stdout.write("\n")
-                    raise EOFError
-            elif k == "bs":
-                if pos:
-                    buf, pos = buf[:pos - 1] + buf[pos:], pos - 1
-            elif k == "del":
-                buf = buf[:pos] + buf[pos + 1:]
-            elif k == "left":
-                pos = max(0, pos - 1)
-            elif k == "right":
-                pos = min(len(buf), pos + 1)
-            elif k == "home":
-                pos = 0
-            elif k == "end":
-                pos = len(buf)
-            elif k in ("up", "down"):
-                if hist == len(JV_HIST):
-                    draft = buf
-                hist = max(0, hist - 1) if k == "up" else min(len(JV_HIST), hist + 1)
-                buf = JV_HIST[hist] if hist < len(JV_HIST) else draft
-                pos = len(buf)
-            elif len(k) == 1 and k >= " ":
-                buf, pos = buf[:pos] + k + buf[pos:], pos + 1
-            draw()
-    except KeyboardInterrupt:
-        sys.stdout.write(TEXT + "\n")
-        raise
-    finally:
-        if old is not None:
-            import termios
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
-    sys.stdout.write(TEXT + "\n")
-    if buf.strip() and (not JV_HIST or JV_HIST[-1] != buf):
-        JV_HIST.append(buf)
-    return buf
-
-
 def prompt():
     base = f"PS {os.getcwd()}> "
     giallo = f"\x01{YELLOW}\x02" if HAS_READLINE else YELLOW
@@ -5367,7 +6480,7 @@ def main():
     try:
         while True:
             try:
-                riga = leggi_riga()
+                riga = input(prompt())
             except EOFError:
                 break
             except KeyboardInterrupt:
