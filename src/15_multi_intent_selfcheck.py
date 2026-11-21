@@ -842,6 +842,7 @@ JV_UPD_ALLOW = (
     ("jv_watch_guard_install", "open-write"),                           # background guard: the one launcher file in the Startup folder
     ("jv_watch_guard_uninstall", "os.remove"),                          # ...and removing exactly that file again
     ("jv_watch_guard_start", "os.remove"), ("jv_watch_guard_start", "subprocess.Popen"),   # clear the stop flag; start the hidden guard
+    ("jv_claude_run", "subprocess.Popen"),   # 3.2.0 bridge: runs the installed 'claude' CLI hidden (text answer only)
     ("jv_watch_guard_stop", "open-write"),                              # the stop flag the guard looks for
     ("jv_watch_daemon", "os.remove"),                                   # the guard removes its own stop flag
 )

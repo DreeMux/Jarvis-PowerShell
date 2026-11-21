@@ -1,5 +1,5 @@
 {
- "sha": "894b1a8424c963928fd46371fb6861e24b4cdb15f47bad7d72bd7bddd3b15f1b",
+ "sha": "300e181a4ada8f31fa73de92b9149ead994799087a272198ddf8aa6dfb100f8c",
  "parts": [
   "01_core.py",
   "02_basic_cmdlets_helpers.py",
@@ -20,6 +20,7 @@
   "17_implement_jarvis.py",
   "18_maintenance.py",
   "19_browser_mode.py",
+  "20_claude_bridge.py",
   "20_screen_watch.py",
   "20_voice.py",
   "21_parser_logo_main.py"
@@ -44,6 +45,7 @@
   "17_implement_jarvis.py": "# ---------------- implement jarvis ----------------",
   "18_maintenance.py": "# ---------------- maintenance (read-only health check) ----------------",
   "19_browser_mode.py": "# ---------------- browser mode: 'jarvis open chrome', then 'open email', 'open canva', 'open chrome account <name>' ----------------",
+  "20_claude_bridge.py": "# ---------------- CLAUDE CODE BRIDGE (version 3.2.0) ----------------",
   "20_screen_watch.py": "# ---------------- SCREEN WATCH: \"is someone watching my screen?\" ----------------",
   "20_voice.py": "# ---------------- VOICE (optional): JARVIS speaks only when you ask ----------------",
   "21_parser_logo_main.py": "# ---------------- PARSER E LOOP ----------------"

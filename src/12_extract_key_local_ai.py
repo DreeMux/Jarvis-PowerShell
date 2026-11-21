@@ -606,6 +606,8 @@ def jv_misses_show():
 
 def jv_didnt_catch(text):
     jv_upd_log_miss(re.sub(JV_NAMED_RE, " ", text, flags=re.I))
+    if jv_claude_fallback(text):       # 3.2.0: unknown requests are answered by Claude Code, pasted as JARVIS
+        return
     t = re.sub(JV_NAMED_RE, " ", text, flags=re.I).strip().lower().rstrip("?!. ")
     if re.match(r"^(?:what|who|why|when|where|how|which|is|are|can|does|do|did|will|would|should|cosa|che|chi|perch|quando|dove|come|quale)\b", t):
         jarvis_say("I can't answer that one offline, sir. I know files, games, your PC, maths, units, dates and a glossary of "
