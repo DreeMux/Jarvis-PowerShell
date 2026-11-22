@@ -23,8 +23,8 @@ Find your games, hunt corrupted files, inspect any file and update itself safely
 ![Jarvis answering a plain-language request](docs/screenshot-assistant.png)
 *Talk to it in plain language, or type PowerShell-style commands.*
 
-![denux.hunter looking for corrupted files](docs/screenshot-hunter.png)
-*The file tools: hunt for corrupted files and inspect any file.*
+![Built-in red-team fuzzing (jarvis hack yourself)](docs/screenshot-hunter.png)
+*Jarvis attacks its own commands with over 1,200 hostile payloads to hunt for vulnerabilities, edge cases, and crashes*
 
 **Jarvis PowerShell** is a terminal that behaves like Windows PowerShell (same colours, same cmdlets, same error messages) with an assistant built in. You can type `dir` and `cd` as usual, or just say what you need:
 
