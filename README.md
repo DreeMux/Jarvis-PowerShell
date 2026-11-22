@@ -86,6 +86,10 @@ JARVIS: As you wish, sir. Checking Steam, Epic, GOG, itch.io and your Downloads 
 - Downloads need `https` and a SHA-256 hash.
 - `security` shows an integrity report of the program.
 
+### Self-testing & red-team fuzzing
+- `maintenance` runs a full health check and 203 automated self-tests across every command.
+- `jarvis hack yourself` throws over 1,200 hostile payloads at Jarvis's own command parser and handlers to catch crashes, edge cases, and injection flaws before anything else can.
+
 ### Online features (only when you ask)
 - **Chrome mode** opens plain `https` pages (e-mail, Canva, YouTube search...). It never types, clicks or reads pages.
 - `jarvis search <topic>` also asks Wikipedia, and `jarvis news` reads RSS feeds.
@@ -162,11 +166,6 @@ Jarvis is read-only except for these things:
 - It keeps a list of sentences it did not understand, plus logs and settings, in a `jarvis_update/` folder next to `pwsh.py`.
 - Screen Watch can install one launcher file in your Windows Startup folder (`watch guard on`, or *Install Guard* in the menu) and remove it again (`watch guard off`, or *Delete Guard*).
 - With the Claude Code bridge on, requests Jarvis cannot answer leave your PC (see above).
-
-### Self-testing & red-team fuzzing
-- `maintenance` runs a full health check and 203 automated self-tests across every command.
-- `jarvis hack yourself` throws over 1,200 hostile payloads at Jarvis's own command parser and handlers to catch crashes, edge cases, and injection flaws before anything else can.
-
 
 ## Disclaimer
 
