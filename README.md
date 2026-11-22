@@ -163,6 +163,11 @@ Jarvis is read-only except for these things:
 - Screen Watch can install one launcher file in your Windows Startup folder (`watch guard on`, or *Install Guard* in the menu) and remove it again (`watch guard off`, or *Delete Guard*).
 - With the Claude Code bridge on, requests Jarvis cannot answer leave your PC (see above).
 
+### Self-testing & red-team fuzzing
+- `maintenance` runs a full health check and 203 automated self-tests across every command.
+- `jarvis hack yourself` throws over 1,200 hostile payloads at Jarvis's own command parser and handlers to catch crashes, edge cases, and injection flaws before anything else can.
+
+
 ## Disclaimer
 
 This software comes with **absolutely no warranty** (see the license). Screen Watch can close programs without asking you to save, so try `watch shield hide` first. Use it at your own risk and read the code before you run it.
